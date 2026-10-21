@@ -11,7 +11,7 @@ from sqlalchemy.engine import make_url
 from app.db.session import SessionLocal, engine
 from app.schemas.telemetry import SensorReading, TelemetryEvent
 from app.security.device_auth import DeviceIdentity
-from app.services.telemetry import ingest_telemetry
+from app.services.telemetry import EventConflict, ingest_telemetry
 
 
 @pytest.fixture(scope="module")
@@ -144,3 +144,45 @@ def test_concurrent_same_event_inserts_once(seeded):
         ).scalar_one()
     assert events == 1
     assert readings == 1
+
+
+def _ingest_or_conflict(identity, event, barrier):
+    barrier.wait(timeout=10)
+    try:
+        with SessionLocal.begin() as db:
+            return ingest_telemetry(db, identity, event).duplicate
+    except EventConflict:
+        return "conflict"
+
+
+def test_concurrent_same_id_different_payload_conflicts(seeded):
+    owner, identity, make_event = seeded
+    event_id = uuid4()
+    events = [
+        make_event(event_id, value=25.0 + i) for i in range(THREADS)
+    ]
+    barrier = Barrier(THREADS)
+
+    with ThreadPoolExecutor(max_workers=THREADS) as pool:
+        futures = [
+            pool.submit(_ingest_or_conflict, identity, ev, barrier)
+            for ev in events
+        ]
+        results = [f.result(timeout=30) for f in futures]
+
+    assert results.count(False) == 1
+    assert results.count("conflict") == THREADS - 1
+
+    with owner.connect() as conn:
+        n_events = conn.execute(
+            text("SELECT count(*) FROM telemetry_events "
+                 "WHERE device_id = :d AND event_id = :e"),
+            {"d": identity.device_id, "e": event_id},
+        ).scalar_one()
+        n_readings = conn.execute(
+            text("SELECT count(*) FROM sensor_readings "
+                 "WHERE tenant_id = :t"),
+            {"t": identity.tenant_id},
+        ).scalar_one()
+    assert n_events == 1
+    assert n_readings == 1
