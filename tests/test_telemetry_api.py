@@ -148,3 +148,35 @@ def test_ingestion_errors_return_safe_status(
 
     assert response.status_code == expected_status
     assert "database" not in response.text
+
+
+def test_database_error_is_logged_without_secrets(client, monkeypatch, caplog):
+    import logging
+
+    _, request = client
+    identity = DeviceIdentity(
+        tenant_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        device_id=UUID(VALID_EVENT["device_id"]),
+    )
+    monkeypatch.setattr(
+        telemetry_api,
+        "authenticate_device",
+        Mock(return_value=identity),
+    )
+    monkeypatch.setattr(
+        telemetry_api,
+        "ingest_telemetry",
+        Mock(side_effect=OperationalError("insert", {}, RuntimeError("database"))),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="app.api.telemetry"):
+        response = asyncio.run(
+            request(VALID_EVENT, {"Authorization": "Bearer test-token"})
+        )
+
+    assert response.status_code == 503
+    assert VALID_EVENT["event_id"] in caplog.text
+    assert VALID_EVENT["device_id"] in caplog.text
+    assert "OperationalError" in caplog.text
+    assert "test-token" not in caplog.text
+    assert "database" not in caplog.text

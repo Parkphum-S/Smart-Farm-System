@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.exc import DBAPIError
@@ -13,6 +15,7 @@ from app.services.telemetry import (
 )
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["telemetry"])
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -61,7 +64,13 @@ def submit_telemetry(
             status_code=status.HTTP_409_CONFLICT,
             detail="Event ID conflicts with an existing event",
         ) from None
-    except DBAPIError:
+    except DBAPIError as exc:
+        logger.error(
+            "Telemetry storage error: event_id=%s device_id=%s error=%s",
+            event.event_id,
+            event.device_id,
+            type(exc).__name__,
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telemetry storage temporarily unavailable",
