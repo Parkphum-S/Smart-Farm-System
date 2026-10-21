@@ -42,3 +42,6 @@ Thumbs.db
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Local ESP32 credentials
+/esp32_firmware/secrets.h
