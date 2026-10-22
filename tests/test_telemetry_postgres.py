@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -12,6 +13,7 @@ from app.schemas.telemetry import SensorReading, TelemetryEvent
 from app.security.device_auth import DeviceIdentity
 from app.services.telemetry import EventConflict, ingest_telemetry
 from app.services.archive_reader import iter_events, iter_readings
+from app.services.archive_bundle import export_telemetry_bundle
 
 
 @pytest.fixture(scope="module")
@@ -289,3 +291,77 @@ def test_archive_reader_uses_half_open_event_interval(farm_device_sensor):
         row["telemetry_event_id"] for row in selected_readings
     } == expected_event_ids
     assert len(selected_readings) == 4
+
+
+
+def test_archive_bundle_exports_events_and_readings_postgres(
+    farm_device_sensor, tmp_path
+):
+    import json
+
+    _, identity, make_event = farm_device_sensor
+    event = make_event(values=[24.5, 25.0])
+
+    with SessionLocal.begin() as db:
+        ingested = ingest_telemetry(db, identity, event)
+
+    start_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    end_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql(
+            "SELECT current_database()"
+        ).scalar_one() == "smartfarm_test"
+        # SELECT triggers SQLAlchemy autobegin; end that transaction
+        # before the exporter starts its own repeatable-read transaction.
+        conn.rollback()
+
+        result = export_telemetry_bundle(
+            conn,
+            tmp_path,
+            start_at,
+            end_at,
+            batch_size=1,
+        )
+
+        # The export must not leave an open transaction or change
+        # the connection's original isolation level.
+        assert not conn.in_transaction()
+        assert conn.get_isolation_level() == "READ COMMITTED"
+
+    bundle_dir = Path(result["bundle_dir"])
+    manifest_path = bundle_dir / "bundle.manifest.json"
+    assert manifest_path.is_file()
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "complete"
+    assert manifest["interval"]["semantics"] == "[start_at, end_at)"
+
+    event_rows = [
+        json.loads(line)
+        for line in (bundle_dir / "events.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line
+    ]
+    reading_rows = [
+        json.loads(line)
+        for line in (bundle_dir / "readings.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line
+    ]
+
+    matching_events = [
+        row for row in event_rows
+        if row["id"] == str(ingested.event_record_id)
+    ]
+    matching_readings = [
+        row for row in reading_rows
+        if row["telemetry_event_id"] == str(ingested.event_record_id)
+    ]
+
+    assert len(matching_events) == 1
+    assert len(matching_readings) == 2
+    assert manifest["files"]["events"]["record_count"] == len(event_rows)
+    assert manifest["files"]["readings"]["record_count"] == len(reading_rows)
