@@ -73,3 +73,39 @@ def test_missing_file_is_reported(tmp_path):
     result = inspect_orphan_archive(tmp_path / "missing.jsonl")
 
     assert result["status"] == "FILE_NOT_FOUND"
+
+
+def test_read_error_marks_partial_result(tmp_path, monkeypatch):
+    path = tmp_path / "read-error.jsonl"
+    path.write_bytes(b'{"ok":true}\n')
+
+    class FailingStream:
+        def __init__(self):
+            self.calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def readline(self):
+            self.calls += 1
+            if self.calls == 1:
+                return b'{"ok":true}\n'
+            raise OSError("simulated read failure")
+
+    original_open = type(path).open
+    stream = FailingStream()
+
+    def patched_open(self, *args, **kwargs):
+        if self == path:
+            return stream
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(path), "open", patched_open)
+
+    result = inspect_orphan_archive(path)
+
+    assert result["status"] == "READ_ERROR"
+    assert result["record_count"] == 1

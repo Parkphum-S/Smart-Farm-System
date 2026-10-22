@@ -24,6 +24,7 @@ def inspect_orphan_archive(data_path: str | Path) -> dict[str, Any]:
         "record_count": 0,
         "size_bytes": 0,
         "sha256": None,
+        "partial_result": False,
         "errors": [],
     }
 
@@ -89,6 +90,10 @@ def inspect_orphan_archive(data_path: str | Path) -> dict[str, Any]:
 
     except OSError as exc:
         result["status"] = "READ_ERROR"
+        result["record_count"] = count
+        result["size_bytes"] = size
+        result["sha256"] = None
+        result["partial_result"] = True
         result["errors"].append(str(exc))
         return result
 
