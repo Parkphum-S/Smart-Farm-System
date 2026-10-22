@@ -1,9 +1,58 @@
-"""Read-only inspection for JSONL archives missing their manifest."""
+"""Read-only inspection for JSONL archives and their manifests."""
 
 import hashlib
 import json
 from pathlib import Path
 from typing import Any
+
+
+def _reject_constant(value: str) -> None:
+    raise ValueError(f"Invalid JSON constant: {value}")
+
+
+def _inspect_manifest(
+    manifest_path: Path,
+    data_path: Path,
+    record_count: int,
+    size_bytes: int,
+    sha256: str,
+) -> list[str]:
+    """Validate a manifest against a fully inspected JSONL file."""
+    errors: list[str] = []
+
+    try:
+        with manifest_path.open("r", encoding="utf-8") as stream:
+            manifest = json.load(stream, parse_constant=_reject_constant)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        return [f"Manifest cannot be read as valid JSON: {exc}"]
+
+    if not isinstance(manifest, dict):
+        return ["Manifest JSON value is not an object"]
+
+    expected = {
+        "format_version": 1,
+        "file": data_path.name,
+        "record_count": record_count,
+        "size_bytes": size_bytes,
+        "sha256": sha256,
+    }
+
+    for key, expected_value in expected.items():
+        actual_value = manifest.get(key)
+        if key in {"format_version", "record_count", "size_bytes"}:
+            if type(actual_value) is not int:
+                errors.append(f"Manifest field {key} must be an integer")
+                continue
+        if actual_value != expected_value:
+            errors.append(
+                f"Manifest field {key} does not match JSONL"
+            )
+
+    created_at = manifest.get("created_at")
+    if not isinstance(created_at, str) or not created_at:
+        errors.append("Manifest field created_at must be a non-empty string")
+
+    return errors
 
 
 def inspect_orphan_archive(data_path: str | Path) -> dict[str, Any]:
@@ -12,9 +61,7 @@ def inspect_orphan_archive(data_path: str | Path) -> dict[str, Any]:
     This function never creates a manifest, renames files, or deletes data.
     """
     path = Path(data_path)
-    manifest_path = path.with_name(
-        f"{path.stem}.manifest.json"
-    )
+    manifest_path = path.with_name(f"{path.stem}.manifest.json")
 
     result: dict[str, Any] = {
         "file": path.name,
@@ -52,27 +99,18 @@ def inspect_orphan_archive(data_path: str | Path) -> dict[str, Any]:
                 digest.update(line)
 
                 if not line.endswith(b"\n"):
-                    errors.append(
-                        f"Line {line_number}: missing newline"
-                    )
+                    errors.append(f"Line {line_number}: missing newline")
 
                 try:
                     text = line.decode("utf-8")
                 except UnicodeDecodeError:
-                    errors.append(
-                        f"Line {line_number}: invalid UTF-8"
-                    )
+                    errors.append(f"Line {line_number}: invalid UTF-8")
                     continue
 
                 try:
-                    def reject_constant(value: str) -> None:
-                        raise ValueError(
-                            f"Invalid JSON constant: {value}"
-                        )
-
                     record = json.loads(
                         text,
-                        parse_constant=reject_constant,
+                        parse_constant=_reject_constant,
                     )
                 except (json.JSONDecodeError, ValueError) as exc:
                     errors.append(
@@ -97,15 +135,34 @@ def inspect_orphan_archive(data_path: str | Path) -> dict[str, Any]:
         result["errors"].append(str(exc))
         return result
 
+    sha256 = digest.hexdigest()
     result["record_count"] = count
     result["size_bytes"] = size
-    result["sha256"] = digest.hexdigest()
+    result["sha256"] = sha256
     result["errors"] = errors
 
+    if errors:
+        result["status"] = (
+            "INVALID_JSONL_MANIFEST_PRESENT"
+            if manifest_path.exists()
+            else "INVALID_JSONL_NO_MANIFEST"
+        )
+        return result
+
     if manifest_path.exists():
-        result["status"] = "MANIFEST_PRESENT_REVIEW_REQUIRED"
-    elif errors:
-        result["status"] = "INVALID_JSONL_NO_MANIFEST"
+        manifest_errors = _inspect_manifest(
+            manifest_path,
+            path,
+            count,
+            size,
+            sha256,
+        )
+        result["errors"] = manifest_errors
+        result["status"] = (
+            "MANIFEST_PRESENT_REVIEW_REQUIRED"
+            if manifest_errors
+            else "VALID_MANIFEST"
+        )
     else:
         result["status"] = "VALID_JSONL_NO_MANIFEST"
 

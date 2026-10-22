@@ -109,3 +109,102 @@ def test_read_error_marks_partial_result(tmp_path, monkeypatch):
 
     assert result["status"] == "READ_ERROR"
     assert result["record_count"] == 1
+
+
+def _write_matching_manifest(tmp_path, data_path, data):
+    manifest_path = tmp_path / f"{data_path.stem}.manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "created_at": "2026-10-23T00:00:00+00:00",
+                "file": data_path.name,
+                "record_count": data.count(b"\n"),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "size_bytes": len(data),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
+def test_valid_manifest_is_confirmed(tmp_path):
+    path = tmp_path / "batch.jsonl"
+    data = b'{"ok":true}\n{"id":2}\n'
+    path.write_bytes(data)
+    manifest = _write_matching_manifest(tmp_path, path, data)
+    original_manifest = manifest.read_bytes()
+
+    result = inspect_orphan_archive(path)
+
+    assert result["status"] == "VALID_MANIFEST"
+    assert result["errors"] == []
+    assert manifest.read_bytes() == original_manifest
+    assert path.read_bytes() == data
+
+
+def test_manifest_sha256_mismatch_requires_review(tmp_path):
+    path = tmp_path / "batch.jsonl"
+    data = b'{"ok":true}\n'
+    path.write_bytes(data)
+    manifest = _write_matching_manifest(tmp_path, path, data)
+    contents = json.loads(manifest.read_text(encoding="utf-8"))
+    contents["sha256"] = "0" * 64
+    manifest.write_text(json.dumps(contents) + "\n", encoding="utf-8")
+    original_manifest = manifest.read_bytes()
+
+    result = inspect_orphan_archive(path)
+
+    assert result["status"] == "MANIFEST_PRESENT_REVIEW_REQUIRED"
+    assert any("sha256" in error for error in result["errors"])
+    assert manifest.read_bytes() == original_manifest
+
+
+def test_malformed_manifest_requires_review(tmp_path):
+    path = tmp_path / "batch.jsonl"
+    path.write_bytes(b'{"ok":true}\n')
+    manifest = tmp_path / "batch.manifest.json"
+    original_manifest = b"{broken json\n"
+    manifest.write_bytes(original_manifest)
+
+    result = inspect_orphan_archive(path)
+
+    assert result["status"] == "MANIFEST_PRESENT_REVIEW_REQUIRED"
+    assert result["errors"]
+    assert manifest.read_bytes() == original_manifest
+
+
+def test_manifest_record_count_and_size_mismatch_requires_review(tmp_path):
+    path = tmp_path / "batch.jsonl"
+    data = b'{"ok":true}\n'
+    path.write_bytes(data)
+    manifest = _write_matching_manifest(tmp_path, path, data)
+    contents = json.loads(manifest.read_text(encoding="utf-8"))
+    contents["record_count"] = 99
+    contents["size_bytes"] = 1
+    manifest.write_text(json.dumps(contents) + "\n", encoding="utf-8")
+
+    result = inspect_orphan_archive(path)
+
+    assert result["status"] == "MANIFEST_PRESENT_REVIEW_REQUIRED"
+    assert any("record_count" in error for error in result["errors"])
+    assert any("size_bytes" in error for error in result["errors"])
+
+
+def test_manifest_wrong_filename_or_version_requires_review(tmp_path):
+    path = tmp_path / "batch.jsonl"
+    data = b'{"ok":true}\n'
+    path.write_bytes(data)
+    manifest = _write_matching_manifest(tmp_path, path, data)
+    contents = json.loads(manifest.read_text(encoding="utf-8"))
+    contents["file"] = "other.jsonl"
+    contents["format_version"] = 2
+    manifest.write_text(json.dumps(contents) + "\n", encoding="utf-8")
+
+    result = inspect_orphan_archive(path)
+
+    assert result["status"] == "MANIFEST_PRESENT_REVIEW_REQUIRED"
+    assert any("file" in error for error in result["errors"])
+    assert any("format_version" in error for error in result["errors"])
