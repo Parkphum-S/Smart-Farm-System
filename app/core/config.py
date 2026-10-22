@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     host: str = "127.0.0.1"
     port: int = 8000
+    archive_path: str = "/mnt/smartfarm-data/archive"
 
 
 settings = Settings()

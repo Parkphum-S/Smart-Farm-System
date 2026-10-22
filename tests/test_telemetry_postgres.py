@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -11,6 +11,7 @@ from app.db.session import SessionLocal, engine
 from app.schemas.telemetry import SensorReading, TelemetryEvent
 from app.security.device_auth import DeviceIdentity
 from app.services.telemetry import EventConflict, ingest_telemetry
+from app.services.archive_reader import iter_events, iter_readings
 
 
 @pytest.fixture(scope="module")
@@ -188,3 +189,103 @@ def test_database_error_rolls_back_event_and_readings(farm_device_sensor):
             text("SELECT count(*) FROM sensor_readings WHERE tenant_id = :tenant"),
             {"tenant": identity.tenant_id},
         ).scalar_one() == 0
+
+def test_archive_reader_streams_events_and_readings_read_only(farm_device_sensor):
+    _, identity, make_event = farm_device_sensor
+    event = make_event(values=[25.5, 26.0])
+
+    with SessionLocal.begin() as db:
+        ingested = ingest_telemetry(db, identity, event)
+
+    start_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    end_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+    with engine.connect().execution_options(
+        isolation_level="REPEATABLE READ"
+    ) as conn:
+        with conn.begin():
+            conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+            assert conn.exec_driver_sql(
+                "SHOW transaction_read_only"
+            ).scalar_one() == "on"
+
+            events = [
+                row for row in iter_events(conn, start_at, end_at, batch_size=1)
+                if row["id"] == ingested.event_record_id
+            ]
+            readings = [
+                row for row in iter_readings(conn, start_at, end_at, batch_size=1)
+                if row["telemetry_event_id"] == ingested.event_record_id
+            ]
+
+    assert len(events) == 1
+    assert events[0]["event_id"] == event.event_id
+    assert len(readings) == 2
+    assert {float(row["value"]) for row in readings} == {25.5, 26.0}
+
+
+def test_archive_reader_uses_half_open_event_interval(farm_device_sensor):
+    owner, identity, make_event = farm_device_sensor
+
+    events = [
+        make_event(values=[25.5, 26.0]),
+        make_event(values=[27.0, 28.0]),
+        make_event(values=[29.0, 30.0]),
+    ]
+    ingested = []
+
+    for event in events:
+        with SessionLocal.begin() as db:
+            ingested.append(ingest_telemetry(db, identity, event))
+
+    start_at = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+    middle_at = datetime(2026, 1, 1, 0, 30, tzinfo=timezone.utc)
+    end_at = datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc)
+
+    timestamps = [start_at, middle_at, end_at]
+
+    with owner.begin() as conn:
+        for result, received_at in zip(ingested, timestamps):
+            conn.execute(
+                text("""
+                    UPDATE telemetry_events
+                    SET received_at = :received_at
+                    WHERE id = :event_record_id
+                      AND tenant_id = :tenant_id
+                """),
+                {
+                    "received_at": received_at,
+                    "event_record_id": result.event_record_id,
+                    "tenant_id": identity.tenant_id,
+                },
+            )
+
+    expected_event_ids = {
+        ingested[0].event_record_id,
+        ingested[1].event_record_id,
+    }
+
+    with engine.connect().execution_options(
+        isolation_level="REPEATABLE READ"
+    ) as conn:
+        with conn.begin():
+            conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+
+            assert conn.exec_driver_sql(
+                "SHOW transaction_read_only"
+            ).scalar_one() == "on"
+
+            selected_events = list(
+                iter_events(conn, start_at, end_at, batch_size=1)
+            )
+            selected_readings = list(
+                iter_readings(conn, start_at, end_at, batch_size=1)
+            )
+
+    assert {row["id"] for row in selected_events} == expected_event_ids
+    assert len(selected_events) == 2
+
+    assert {
+        row["telemetry_event_id"] for row in selected_readings
+    } == expected_event_ids
+    assert len(selected_readings) == 4
