@@ -102,6 +102,32 @@ def test_create_command_returns_existing_for_same_request():
     db.execute.assert_called_once()
 
 
+def test_create_command_rejects_same_key_for_different_device():
+    from app.services.commands import _request_hash
+
+    identity = make_identity()
+    user_id = uuid4()
+    request = make_request()
+    row = make_command(
+        identity,
+        requested_by_user_id=user_id,
+        request_hash=_request_hash(request),
+    )
+    db = Mock()
+    db.execute.return_value = result_with(row)
+
+    with pytest.raises(CommandConflict, match="another device"):
+        create_command(
+            db,
+            tenant_id=identity.tenant_id,
+            device_id=uuid4(),
+            user_id=user_id,
+            request=request,
+        )
+
+    db.execute.assert_called_once()
+
+
 def test_create_command_rejects_reused_key_with_different_request():
     identity = make_identity()
     user_id = uuid4()

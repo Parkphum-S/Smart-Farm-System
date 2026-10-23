@@ -88,6 +88,7 @@ def command_context(postgres_engines):
 
     tenant_id = uuid4()
     device_id = uuid4()
+    second_device_id = uuid4()
     user_id = uuid4()
 
     # Seed only uniquely identified fixture rows with the owner role.
@@ -118,6 +119,24 @@ def command_context(postgres_engines):
         )
         conn.execute(
             text("""
+                INSERT INTO devices (
+                    id, tenant_id, farm_id, device_code,
+                    device_type, name, status
+                )
+                VALUES (
+                    :id, :tenant_id, NULL, :device_code,
+                    'relay_controller', 'Second concurrency test device',
+                    'active'
+                )
+            """),
+            {
+                "id": second_device_id,
+                "tenant_id": tenant_id,
+                "device_code": f"cmd-test-{second_device_id}",
+            },
+        )
+        conn.execute(
+            text("""
                 INSERT INTO users (id, email, display_name, status)
                 VALUES (:id, :email, 'Command concurrency test', 'active')
             """),
@@ -132,6 +151,7 @@ def command_context(postgres_engines):
         "owner_engine": owner_engine,
         "tenant_id": tenant_id,
         "device_id": device_id,
+        "second_device_id": second_device_id,
         "user_id": user_id,
     }
 
@@ -171,10 +191,15 @@ def make_request(key, state="off"):
     )
 
 
-def run_concurrently(context, requests):
+def run_concurrently(context, requests, device_ids=None):
     barrier = Barrier(len(requests))
+    if device_ids is None:
+        device_ids = [context["device_id"]] * len(requests)
+    if len(device_ids) != len(requests):
+        raise ValueError("Each request must have one device ID")
 
-    def worker(request):
+    def worker(item):
+        request, device_id = item
         # Every worker owns a separate session and transaction.
         with context["sessions"]() as db:
             barrier.wait(timeout=15)
@@ -183,7 +208,7 @@ def run_concurrently(context, requests):
                     row, was_existing = create_command(
                         db,
                         tenant_id=context["tenant_id"],
-                        device_id=context["device_id"],
+                        device_id=device_id,
                         user_id=context["user_id"],
                         request=request,
                     )
@@ -197,7 +222,7 @@ def run_concurrently(context, requests):
                 return {"outcome": "conflict"}
 
     with ThreadPoolExecutor(max_workers=len(requests)) as pool:
-        return list(pool.map(worker, requests))
+        return list(pool.map(worker, zip(requests, device_ids)))
 
 
 def database_counts(context, key):
@@ -277,4 +302,28 @@ def test_concurrent_different_payloads_with_same_key_conflict(
     commands, events = database_counts(command_context, key)
     assert len(commands) == 1
     assert commands[0]["parameters"]["state"] in {"on", "off"}
+    assert events == {"created": 1}
+
+
+def test_concurrent_same_key_and_payload_for_different_devices_conflict(
+    command_context,
+):
+    key = f"different-device-{uuid4()}"
+    request = make_request(key, "off")
+    device_ids = [
+        command_context["device_id"],
+        command_context["second_device_id"],
+    ]
+
+    results = run_concurrently(
+        command_context,
+        [request, request],
+        device_ids=device_ids,
+    )
+
+    assert sum(result["outcome"] == "ok" for result in results) == 1
+    assert sum(result["outcome"] == "conflict" for result in results) == 1
+
+    commands, events = database_counts(command_context, key)
+    assert len(commands) == 1
     assert events == {"created": 1}

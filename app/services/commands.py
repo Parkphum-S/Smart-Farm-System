@@ -142,6 +142,10 @@ def create_command(
     ).mappings().first()
 
     if existing is not None:
+        if existing["device_id"] != device_id:
+            raise CommandConflict(
+                "Idempotency key already used for another device"
+            )
         if existing["request_hash"] != digest:
             raise CommandConflict("Idempotency key reused with different request")
         return dict(existing), True
@@ -222,6 +226,10 @@ def create_command(
                 "could not be found"
             )
 
+        if existing["device_id"] != device_id:
+            raise CommandConflict(
+                "Idempotency key already used for another device"
+            )
         if existing["request_hash"] != digest:
             raise CommandConflict(
                 "Idempotency key reused with different request"
