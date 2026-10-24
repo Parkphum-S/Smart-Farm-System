@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
-import { ApiError, farmApi } from "./services/api";
+import { ApiError, commandApi, deviceApi, farmApi } from "./services/api";
+import type { DeviceCommand } from "./services/api";
+import type { Device } from "./services/api";
 
 async function copyTextToClipboard(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
@@ -179,7 +181,20 @@ export default function App() {
   const [farmsError, setFarmsError] = useState("");
   const [farmsRequested, setFarmsRequested] = useState(false);
   const [farmsReloadKey, setFarmsReloadKey] = useState(0);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [devicesLoading, setDevicesLoading] = useState(false);
+  const [devicesError, setDevicesError] = useState("");
+  const [devicesRequested, setDevicesRequested] = useState(false);
+  const [devicesReloadKey, setDevicesReloadKey] = useState(0);
   const [copiedField, setCopiedField] = useState("");
+
+const [relayBusyKey, setRelayBusyKey] = useState("");
+const [relayMessages, setRelayMessages] = useState<Record<string, string>>({});
+const [relayErrors, setRelayErrors] = useState<Record<string, string>>({});
+const [commandHistories, setCommandHistories] = useState<Record<string, DeviceCommand[]>>({});
+const [commandHistoryLoading, setCommandHistoryLoading] = useState<Record<string, boolean>>({});
+const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, string>>({});
+
   const [selectedFarm, setSelectedFarm] = useState<{
     id: string; name: string; timezone: string;
     created_at: string; updated_at: string;
@@ -260,6 +275,89 @@ export default function App() {
       cancelled = true;
     };
   }, [selectedPage, tenantId, farmsReloadKey]);
+
+  useEffect(() => {
+    if (selectedPage !== "devices") {
+      return;
+    }
+
+    if (!tenantId.trim()) {
+      setDevices([]);
+      setDevicesError("");
+      setDevicesRequested(false);
+      setDevicesLoading(false);
+      return;
+    }
+
+    if (!isTenantUuid(tenantId.trim())) {
+      setDevices([]);
+      setDevicesError("Tenant ID ต้องเป็น UUID รูปแบบเต็ม");
+      setDevicesRequested(false);
+      setDevicesLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const requestedTenantId = tenantId.trim();
+
+    setDevicesLoading(true);
+    setDevicesError("");
+    setDevicesRequested(true);
+
+    deviceApi.list(requestedTenantId)
+      .then((result) => {
+        if (cancelled) return;
+
+        setDevices(result);
+
+        try {
+          localStorage.setItem(
+            "smartfarm.selectedTenantId",
+            requestedTenantId,
+          );
+
+          setTenantHistory((previous) => {
+            const next = [
+              requestedTenantId,
+              ...previous.filter(
+                (value) =>
+                  value.toLowerCase() !== requestedTenantId.toLowerCase(),
+              ),
+            ].slice(0, 10);
+
+            try {
+              localStorage.setItem(
+                "smartfarm.tenantHistory",
+                JSON.stringify(next),
+              );
+            } catch {
+              // Keep the current session usable if storage is unavailable.
+            }
+
+            return next;
+          });
+        } catch {
+          // Keep the current session usable if storage is unavailable.
+        }
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+
+        setDevices([]);
+        setDevicesError(
+          error instanceof ApiError
+            ? error.message
+            : "ไม่สามารถโหลดรายการอุปกรณ์ได้ กรุณาลองใหม่",
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setDevicesLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPage, tenantId, devicesReloadKey]);
 
   const page = pageTitles[selectedPage] ?? pageTitles.dashboard;
 
@@ -976,6 +1074,351 @@ export default function App() {
                     ไม่มีการสร้างข้อมูลจำลองหรือส่งคำขอไปยัง API ที่ยังไม่รองรับ
                   </span>
                 </div>
+              </section>
+            </div>
+          ) : selectedPage === "devices" ? (
+            <div className="device-management-page">
+              <section className="section-block device-management-panel">
+                <div className="section-heading">
+                  <div>
+                    <h2>รายการอุปกรณ์</h2>
+                    <p>ข้อมูลจาก Device API ตามสิทธิ์ของ Tenant ที่ระบุ</p>
+                  </div>
+                  <span className="section-note">
+                    <span className={`status-dot ${devicesError ? "status-dot-muted" : ""}`} />
+                    {devicesLoading
+                      ? "กำลังโหลด"
+                      : devicesError
+                        ? "โหลดข้อมูลไม่สำเร็จ"
+                        : devicesRequested
+                          ? "เชื่อมต่อ API แล้ว"
+                          : "รอ Tenant ID"}
+                  </span>
+                </div>
+
+                <form
+                  className="farm-tenant-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (!isTenantUuid(tenantId.trim())) return;
+                    setTenantId(tenantId.trim());
+                    setDevicesReloadKey((key) => key + 1);
+                  }}
+                >
+                  <label htmlFor="device-tenant-id">Tenant ID</label>
+                  <div className="farm-tenant-controls">
+                    <input
+                      id="device-tenant-id"
+                      type="text"
+                      value={tenantId}
+                      onChange={(event) => setTenantId(event.target.value)}
+                      placeholder="ระบุ Tenant ID ที่บัญชีนี้มีสิทธิ์เข้าถึง"
+                      autoComplete="off"
+                      required
+                    />
+                    <button
+                      className="primary-button"
+                      type="submit"
+                      disabled={devicesLoading || !isTenantUuid(tenantId.trim())}
+                    >
+                      {devicesLoading ? "กำลังโหลด…" : "โหลดอุปกรณ์"}
+                    </button>
+                  </div>
+                  <p className="farm-helper-text">
+                    ใช้ Tenant ID ที่ได้รับอนุญาต ระบบใช้ Access Token ผ่าน API service เดิม
+                  </p>
+                </form>
+
+                <div className="tenant-history-panel">
+                  <div className="tenant-history-heading">
+                    <strong>ประวัติ Tenant ID</strong>
+                    <span>{tenantHistory.length}/10 รายการ</span>
+                  </div>
+                  {tenantHistory.length > 0 ? (
+                    <div className="tenant-history-list">
+                      {tenantHistory.map((savedTenantId) => (
+                        <button
+                          key={savedTenantId}
+                          className={`tenant-history-item ${
+                            tenantId.toLowerCase() === savedTenantId.toLowerCase()
+                              ? "active"
+                              : ""
+                          }`}
+                          type="button"
+                          onClick={() => {
+                            setTenantId(savedTenantId);
+                            setDevicesReloadKey((key) => key + 1);
+                          }}
+                          title={savedTenantId}
+                        >
+                          <span>{formatTenantDisplayId(savedTenantId)}</span>
+                          <span>
+                            {tenantId.toLowerCase() === savedTenantId.toLowerCase()
+                              ? "กำลังเลือก"
+                              : "เลือก Tenant"}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="farm-helper-text">
+                      ประวัติจะปรากฏหลังโหลดข้อมูลจาก API สำเร็จ
+                    </p>
+                  )}
+                </div>
+
+                <div className="device-list-toolbar">
+                  <span>
+                    {devicesRequested && !devicesLoading && !devicesError
+                      ? `${devices.length} อุปกรณ์`
+                      : "รายการอุปกรณ์"}
+                  </span>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={devicesLoading || !isTenantUuid(tenantId.trim())}
+                    onClick={() => setDevicesReloadKey((key) => key + 1)}
+                  >
+                    โหลดใหม่
+                  </button>
+                </div>
+
+                {devicesError && (
+                  <div className="farm-message farm-message-error" role="alert">
+                    <strong>ไม่สามารถโหลดรายการอุปกรณ์</strong>
+                    <p>{devicesError}</p>
+                  </div>
+                )}
+
+                {!devicesError && devicesLoading && (
+                  <div className="farm-message" role="status">
+                    กำลังดึงข้อมูลอุปกรณ์จากเซิร์ฟเวอร์…
+                  </div>
+                )}
+
+                {!devicesError && !devicesLoading && !devicesRequested && (
+                  <div className="farm-list-empty">
+                    <span className="zone-empty-symbol" aria-hidden="true">▣</span>
+                    <h3>{tenantId.trim() ? "พร้อมโหลดข้อมูลอุปกรณ์" : "กรุณาระบุ Tenant ID"}</h3>
+                    <p>
+                      {tenantId.trim()
+                        ? "ตรวจสอบ Tenant ID แล้วกดโหลดอุปกรณ์"
+                        : "กรอก Tenant ID ที่บัญชีของคุณได้รับอนุญาตให้เข้าถึง"}
+                    </p>
+                  </div>
+                )}
+
+                {!devicesError && !devicesLoading && devicesRequested && devices.length === 0 && (
+                  <div className="farm-list-empty">
+                    <span className="zone-empty-symbol" aria-hidden="true">▣</span>
+                    <h3>ไม่พบรายการอุปกรณ์</h3>
+                    <p>API ไม่พบอุปกรณ์สำหรับ Tenant นี้ หรือยังไม่มีข้อมูลอุปกรณ์</p>
+                  </div>
+                )}
+
+                {!devicesError && !devicesLoading && devices.length > 0 && (
+                  <div className="device-list" aria-label="รายการอุปกรณ์">
+                    {devices.map((device) => {
+                      const statusLabels: Record<string, string> = {
+                        active: "เปิดใช้งาน",
+                        pending: "รอเปิดใช้งาน",
+                        disabled: "ปิดใช้งาน",
+                        revoked: "เพิกถอนแล้ว",
+                      };
+                      return (
+                        <article className="device-card" key={device.id}>
+                          <div className="device-card-top">
+                            <span className="device-card-icon" aria-hidden="true">▣</span>
+                            <div className="device-card-title">
+                              <h3>{device.name}</h3>
+                              <p>{device.device_code}</p>
+                            </div>
+                            <span className={`device-status device-status-${device.status}`}>
+                              {statusLabels[device.status] ?? device.status}
+                            </span>
+                          </div>
+                          <dl className="device-card-details">
+                            <div>
+                              <dt>ชนิดอุปกรณ์</dt>
+                              <dd>{device.device_type}</dd>
+                            </div>
+                            <div>
+
+                          <section className="relay-control-panel" aria-label={`ควบคุม Relay ของ ${device.name}`}>
+                            <div className="relay-panel-heading">
+                              <h4>ควบคุมรีเลย์</h4>
+                              <span>4 ช่อง</span>
+                            </div>
+                            <p className="relay-safety-note">
+                              ส่งคำสั่งไปยัง API เท่านั้น ยังไม่มีการยืนยันว่ารีเลย์จริงทำงานแล้ว
+                            </p>
+                            {device.status !== "active" && (
+                              <p className="relay-inline-warning" role="status">
+                                ต้องเปิดใช้งานอุปกรณ์ก่อนจึงจะส่งคำสั่งได้
+                              </p>
+                            )}
+                            {[1, 2, 3, 4].map((relay) => {
+                              const key = `${device.id}:${relay}`;
+                              const busy = relayBusyKey === key;
+                              return (
+                                <div className="relay-row" key={relay}>
+                                  <span className="relay-name">Relay {relay}</span>
+                                  <div className="relay-actions">
+                                    <button
+                                      type="button"
+                                      className="relay-button relay-button-on"
+                                      disabled={device.status !== "active" || Boolean(relayBusyKey) || !isTenantUuid(tenantId.trim())}
+                                      onClick={async () => {
+                                        if (relayBusyKey) return;
+                                        setRelayBusyKey(key);
+                                        setRelayErrors((prev) => ({ ...prev, [key]: "" }));
+                                        setRelayMessages((prev) => ({ ...prev, [key]: "" }));
+                                        try {
+                                          const idempotencyKey = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+                                            ? crypto.randomUUID()
+                                            : `${Date.now()}-${relay}-on`;
+                                          const result = await commandApi.createRelayCommand(
+                                            tenantId.trim(), device.id, relay, "on", idempotencyKey
+                                          );
+                                          setRelayMessages((prev) => ({
+                                            ...prev,
+                                            [key]: `บันทึกคำสั่งเปิดแล้ว (${result.command.status})${result.duplicate ? " · คำสั่งเดิม" : ""} — ยังไม่ยืนยันสถานะฮาร์ดแวร์`,
+                                          }));
+                                          try {
+                                            const history = await commandApi.history(tenantId.trim(), device.id, 10);
+                                            setCommandHistories((prev) => ({ ...prev, [device.id]: history.commands }));
+                                            setCommandHistoryErrors((prev) => ({ ...prev, [device.id]: "" }));
+                                          } catch (error) {
+                                            setCommandHistoryErrors((prev) => ({
+                                              ...prev,
+                                              [device.id]: error instanceof Error ? error.message : "โหลดประวัติคำสั่งไม่สำเร็จ",
+                                            }));
+                                          }
+                                        } catch (error) {
+                                          setRelayErrors((prev) => ({
+                                            ...prev,
+                                            [key]: error instanceof Error ? error.message : "ส่งคำสั่งไม่สำเร็จ",
+                                          }));
+                                        } finally {
+                                          setRelayBusyKey("");
+                                        }
+                                      }}
+                                    >
+                                      {busy ? "กำลังส่ง…" : "สั่งเปิด"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="relay-button relay-button-off"
+                                      disabled={device.status !== "active" || Boolean(relayBusyKey) || !isTenantUuid(tenantId.trim())}
+                                      onClick={async () => {
+                                        if (relayBusyKey) return;
+                                        setRelayBusyKey(key);
+                                        setRelayErrors((prev) => ({ ...prev, [key]: "" }));
+                                        setRelayMessages((prev) => ({ ...prev, [key]: "" }));
+                                        try {
+                                          const idempotencyKey = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+                                            ? crypto.randomUUID()
+                                            : `${Date.now()}-${relay}-off`;
+                                          const result = await commandApi.createRelayCommand(
+                                            tenantId.trim(), device.id, relay, "off", idempotencyKey
+                                          );
+                                          setRelayMessages((prev) => ({
+                                            ...prev,
+                                            [key]: `บันทึกคำสั่งปิดแล้ว (${result.command.status})${result.duplicate ? " · คำสั่งเดิม" : ""} — ยังไม่ยืนยันสถานะฮาร์ดแวร์`,
+                                          }));
+                                          try {
+                                            const history = await commandApi.history(tenantId.trim(), device.id, 10);
+                                            setCommandHistories((prev) => ({ ...prev, [device.id]: history.commands }));
+                                            setCommandHistoryErrors((prev) => ({ ...prev, [device.id]: "" }));
+                                          } catch (error) {
+                                            setCommandHistoryErrors((prev) => ({
+                                              ...prev,
+                                              [device.id]: error instanceof Error ? error.message : "โหลดประวัติคำสั่งไม่สำเร็จ",
+                                            }));
+                                          }
+                                        } catch (error) {
+                                          setRelayErrors((prev) => ({
+                                            ...prev,
+                                            [key]: error instanceof Error ? error.message : "ส่งคำสั่งไม่สำเร็จ",
+                                          }));
+                                        } finally {
+                                          setRelayBusyKey("");
+                                        }
+                                      }}
+                                    >
+                                      {busy ? "กำลังส่ง…" : "สั่งปิด"}
+                                    </button>
+                                  </div>
+                                  {relayMessages[key] && <p className="relay-inline-success" role="status">{relayMessages[key]}</p>}
+                                  {relayErrors[key] && <p className="relay-inline-error" role="alert">{relayErrors[key]}</p>}
+                                </div>
+                              );
+                            })}
+                            <div className="relay-history-header">
+                              <h5>ประวัติคำสั่ง</h5>
+                              <button
+                                type="button"
+                                className="relay-history-button"
+                                disabled={Boolean(commandHistoryLoading[device.id]) || !isTenantUuid(tenantId.trim())}
+                                onClick={async () => {
+                                  setCommandHistoryLoading((prev) => ({ ...prev, [device.id]: true }));
+                                  setCommandHistoryErrors((prev) => ({ ...prev, [device.id]: "" }));
+                                  try {
+                                    const history = await commandApi.history(tenantId.trim(), device.id, 10);
+                                    setCommandHistories((prev) => ({ ...prev, [device.id]: history.commands }));
+                                  } catch (error) {
+                                    setCommandHistoryErrors((prev) => ({
+                                      ...prev,
+                                      [device.id]: error instanceof Error ? error.message : "โหลดประวัติคำสั่งไม่สำเร็จ",
+                                    }));
+                                  } finally {
+                                    setCommandHistoryLoading((prev) => ({ ...prev, [device.id]: false }));
+                                  }
+                                }}
+                              >
+                                {commandHistoryLoading[device.id] ? "กำลังโหลด…" : commandHistories[device.id] ? "รีเฟรชประวัติ" : "โหลดประวัติ"}
+                              </button>
+                            </div>
+                            {commandHistoryErrors[device.id] && (
+                              <p className="relay-inline-error" role="alert">{commandHistoryErrors[device.id]}</p>
+                            )}
+                            {commandHistories[device.id] && (
+                              commandHistories[device.id].length === 0
+                                ? <p className="relay-history-empty">ยังไม่มีประวัติคำสั่ง</p>
+                                : <ul className="relay-history-list">
+                                    {commandHistories[device.id].map((command) => (
+                                      <li key={command.id}>
+                                        <span>
+                                          Relay {command.parameters.relay} · {command.parameters.state === "on" ? "สั่งเปิด" : "สั่งปิด"}
+                                        </span>
+                                        <span className="relay-command-status">{command.status}</span>
+                                        <time dateTime={command.created_at}>{formatThaiDate(command.created_at)}</time>
+                                      </li>
+                                    ))}
+                                  </ul>
+                            )}
+                          </section>
+
+                              <dt>พบล่าสุด</dt>
+                              <dd>
+                                {device.last_seen_at
+                                  ? formatThaiDate(device.last_seen_at)
+                                  : "ยังไม่มีข้อมูล"}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>Farm ID</dt>
+                              <dd>{device.farm_id ?? "ยังไม่ได้ผูกกับฟาร์ม"}</dd>
+                            </div>
+                          </dl>
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+                <p className="farm-helper-text device-api-note">
+                  หน้านี้แสดงข้อมูลที่ API ส่งกลับเท่านั้น ยังไม่มีการสั่งงานหรือเปลี่ยนสถานะอุปกรณ์
+                </p>
               </section>
             </div>
           ) : (

@@ -1,0 +1,12 @@
+{
+  "name": "smart-farm-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev:web": "npm run dev --workspace @smart-farm/web",
+    "build:web": "npm run build --workspace @smart-farm/web",
+    "typecheck:web": "npm run typecheck --workspace @smart-farm/web"
+  }
+}
