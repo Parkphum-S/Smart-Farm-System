@@ -7,8 +7,9 @@ import pytest
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import sessionmaker
 
-from app.db.session import engine
+from app.db.session import get_db
 from app.main import app
 from app.security.user_auth import hash_password, hash_session_token
 
@@ -36,9 +37,33 @@ def owner_engine():
         test_engine.dispose()
 
 
+@pytest.fixture(scope="module")
+def app_engine():
+    load_dotenv(".env")
+    raw_url = os.environ.get("SMARTFARM_DATABASE_URL")
+    assert raw_url, "Runtime database URL is not configured"
+
+    url = make_url(raw_url)
+    assert url.database == "smartfarm", "Unexpected runtime DB target"
+    test_engine = create_engine(
+        url.set(database="smartfarm_test"),
+        pool_pre_ping=True,
+    )
+    try:
+        with test_engine.connect() as conn:
+            database, role = conn.execute(
+                text("SELECT current_database(), current_user")
+            ).one()
+        assert database == "smartfarm_test", f"Unsafe test database: {database}"
+        assert role == "smartfarm_app", f"Unexpected runtime role: {role}"
+        yield test_engine
+    finally:
+        test_engine.dispose()
+
+
 @pytest.fixture(autouse=True)
-def require_test_database():
-    with engine.connect() as conn:
+def require_test_database(app_engine):
+    with app_engine.connect() as conn:
         database, role = conn.execute(
             text("SELECT current_database(), current_user")
         ).one()
@@ -93,7 +118,7 @@ def auth_user(owner_engine):
 
 
 @pytest.fixture
-def http_client():
+def http_client(app_engine):
     class SyncASGIClient:
         def request(self, method, url, **kwargs):
             async def send():
@@ -112,7 +137,28 @@ def http_client():
         def get(self, url, **kwargs):
             return self.request("GET", url, **kwargs)
 
-    return SyncASGIClient()
+    test_sessions = sessionmaker(
+        bind=app_engine,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+
+    def override_get_db():
+        db = test_sessions()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    previous_override = app.dependency_overrides.get(get_db)
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        yield SyncASGIClient()
+    finally:
+        if previous_override is None:
+            app.dependency_overrides.pop(get_db, None)
+        else:
+            app.dependency_overrides[get_db] = previous_override
 
 
 def login(client, user, password=None):
@@ -276,3 +322,128 @@ def test_disabled_user_cannot_login(http_client, auth_user):
 
     response = login(http_client, auth_user)
     assert response.status_code == 401
+
+
+@pytest.fixture
+def tenant_access_records(auth_user):
+    owner = auth_user["owner"]
+    user_id = auth_user["id"]
+    records = [
+        (uuid4(), "Tenant Access Alpha", "owner", "active", "active"),
+        (uuid4(), "Tenant Access Beta", "viewer", "active", "active"),
+        (uuid4(), "Tenant Access Gamma", "operator", "active", "active"),
+        (uuid4(), "Tenant Access Hidden Membership", "owner", "suspended", "active"),
+        (uuid4(), "Tenant Access Hidden Tenant", "owner", "active", "suspended"),
+    ]
+
+    with owner.begin() as conn:
+        for tenant_id, name, role, membership_status, tenant_status in records:
+            conn.execute(
+                text("""
+                    INSERT INTO tenants (id, name, status)
+                    VALUES (:id, :name, :status)
+                """),
+                {"id": tenant_id, "name": name, "status": tenant_status},
+            )
+            conn.execute(
+                text("""
+                    INSERT INTO tenant_memberships
+                        (tenant_id, user_id, role, status)
+                    VALUES (:tenant_id, :user_id, :role, :status)
+                """),
+                {
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                    "role": role,
+                    "status": membership_status,
+                },
+            )
+
+    yield records
+
+    with owner.begin() as conn:
+        conn.execute(
+            text("DELETE FROM tenant_memberships WHERE user_id = :user_id"),
+            {"user_id": user_id},
+        )
+        for tenant_id, *_ in records:
+            conn.execute(
+                text("DELETE FROM tenants WHERE id = :id"),
+                {"id": tenant_id},
+            )
+
+
+def test_tenant_discovery_returns_only_active_authorized_tenants(
+    http_client, auth_user, tenant_access_records
+):
+    login_response = login(http_client, auth_user)
+    assert login_response.status_code == 200
+    token = login_response.json()["access_token"]
+
+    response = http_client.get(
+        "/api/v1/auth/tenants",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["name"] for item in body] == [
+        "Tenant Access Alpha",
+        "Tenant Access Beta",
+        "Tenant Access Gamma",
+    ]
+    assert [item["role"] for item in body] == [
+        "owner",
+        "viewer",
+        "operator",
+    ]
+    assert all(
+        set(item) == {"id", "name", "role"}
+        for item in body
+    )
+
+
+def test_tenant_discovery_returns_empty_list_without_memberships(
+    http_client, auth_user
+):
+    login_response = login(http_client, auth_user)
+    assert login_response.status_code == 200
+    token = login_response.json()["access_token"]
+
+    response = http_client.get(
+        "/api/v1/auth/tenants",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_tenant_discovery_rejects_expired_session(http_client, auth_user):
+    login_response = login(http_client, auth_user)
+    assert login_response.status_code == 200
+    token = login_response.json()["access_token"]
+
+    with auth_user["owner"].begin() as conn:
+        conn.execute(
+            text("""
+                UPDATE user_sessions
+                SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
+                WHERE token_hash = :token_hash
+            """),
+            {"token_hash": hash_session_token(token)},
+        )
+
+    response = http_client.get(
+        "/api/v1/auth/tenants",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_tenant_discovery_requires_bearer_token(http_client):
+    response = http_client.get("/api/v1/auth/tenants")
+
+    assert response.status_code == 401
+    assert response.headers.get("www-authenticate") == "Bearer"

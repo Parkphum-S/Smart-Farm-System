@@ -7,6 +7,12 @@ export interface AuthUser {
   display_name: string;
 }
 
+export interface TenantAccess {
+  id: string;
+  name: string;
+  role: "owner" | "operator" | "viewer";
+}
+
 export interface LoginResponse {
   access_token: string;
   token_type: string;
@@ -120,6 +126,64 @@ export const farmApi = {
 };
 
 
+
+export interface Zone {
+  id: string;
+  tenant_id: string;
+  farm_id: string;
+  name: string;
+  description: string | null;
+  status: "active" | "disabled";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ZoneCreate {
+  name: string;
+  description?: string | null;
+  status?: "active" | "disabled";
+}
+
+export type ZoneUpdate = Partial<ZoneCreate>;
+
+export const zoneApi = {
+  list(tenantId: string, farmId: string, query = ""): Promise<Zone[]> {
+    const suffix = query.trim()
+      ? `?q=${encodeURIComponent(query.trim())}`
+      : "";
+    return request<Zone[]>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/farms/${encodeURIComponent(farmId)}/zones${suffix}`,
+    );
+  },
+
+  create(tenantId: string, farmId: string, data: ZoneCreate): Promise<Zone> {
+    return request<Zone>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/farms/${encodeURIComponent(farmId)}/zones`,
+      { method: "POST", body: JSON.stringify(data) },
+    );
+  },
+
+  update(
+    tenantId: string,
+    farmId: string,
+    zoneId: string,
+    data: ZoneUpdate,
+  ): Promise<Zone> {
+    return request<Zone>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/farms/${encodeURIComponent(farmId)}/zones/${encodeURIComponent(zoneId)}`,
+      { method: "PATCH", body: JSON.stringify(data) },
+    );
+  },
+
+  delete(tenantId: string, farmId: string, zoneId: string): Promise<void> {
+    return request<void>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/farms/${encodeURIComponent(farmId)}/zones/${encodeURIComponent(zoneId)}`,
+      { method: "DELETE" },
+    );
+  },
+};
+
+
 export interface Device {
   id: string;
   device_code: string;
@@ -205,6 +269,11 @@ export const commandApi = {
 };
 
 export const authApi = {
+  tenants(): Promise<TenantAccess[]> {
+    return request<TenantAccess[]>("/api/v1/auth/tenants");
+  },
+
+
   login(email: string, password: string): Promise<LoginResponse> {
     return request<LoginResponse>(
       "/api/v1/auth/login",

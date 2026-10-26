@@ -7,8 +7,9 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import sessionmaker
 
-from app.db.session import SessionLocal, engine
+from app.db.session import SessionLocal
 from app.schemas.telemetry import SensorReading, TelemetryEvent
 from app.security.device_auth import DeviceIdentity
 from app.services.telemetry import EventConflict, ingest_telemetry
@@ -29,14 +30,50 @@ def owner_engine():
         db_engine.dispose()
 
 
+
+
+@pytest.fixture(scope="module")
+def app_engine():
+    from dotenv import load_dotenv
+
+    load_dotenv(".env")
+    raw = os.environ.get("SMARTFARM_DATABASE_URL")
+    assert raw, "Runtime database URL is not configured"
+    url = make_url(raw)
+    assert url.database == "smartfarm", "Unexpected runtime DB target"
+
+    test_engine = create_engine(
+        url.set(database="smartfarm_test"),
+        pool_pre_ping=True,
+    )
+    try:
+        with test_engine.connect() as conn:
+            database, role = conn.execute(
+                text("SELECT current_database(), current_user")
+            ).one()
+        assert database == "smartfarm_test", f"Unsafe test database: {database}"
+        assert role == "smartfarm_app", f"Unexpected runtime role: {role}"
+        yield test_engine
+    finally:
+        test_engine.dispose()
+
+
 @pytest.fixture(autouse=True)
-def require_test_database():
-    with engine.connect() as conn:
-        db, role = conn.execute(
+def require_test_database(app_engine, monkeypatch):
+    with app_engine.connect() as conn:
+        database, role = conn.execute(
             text("SELECT current_database(), current_user")
         ).one()
-    assert db == "smartfarm_test", f"Unsafe test database: {db}"
+    assert database == "smartfarm_test", f"Unsafe test database: {database}"
     assert role == "smartfarm_app", f"Unexpected runtime role: {role}"
+
+
+    # Route SessionLocal calls in this test module to the guarded test DB.
+    monkeypatch.setitem(
+        globals(),
+        "SessionLocal",
+        sessionmaker(bind=app_engine, autoflush=False, autocommit=False),
+    )
 
 
 @pytest.fixture

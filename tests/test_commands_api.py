@@ -27,7 +27,10 @@ COMMAND_ROW = {
     "parameters": {"relay": 1, "state": "off"},
     "status": "sent",
     "created_at": CREATED_AT,
-    "expires_at": datetime(2026, 10, 1, 0, 1, tzinfo=timezone.utc),
+    "expires_at": datetime(
+        2026, 10, 1, 0, 1, 0, 653846,
+        tzinfo=timezone.utc,
+    ),
     "updated_at": CREATED_AT,
     "correlation_id": None,
     "result_summary": None,
@@ -145,7 +148,106 @@ def test_pending_commands_returns_filtered_response(
     assert len(body["commands"]) == 1
     command = body["commands"][0]
     assert command["id"] == str(COMMAND_ID)
+    assert command["expires_at"] == "2026-10-01T00:01:00.653846Z"
+    assert command["expires_at"].endswith("Z")
     assert "tenant_id" not in command
     assert "requested_by_user_id" not in command
     assert "idempotency_key" not in command
     assert "request_hash" not in command
+
+
+def test_viewer_cannot_create_command(
+    command_client, monkeypatch
+):
+    from types import SimpleNamespace
+    from app.api import dependencies
+
+    db, request = command_client
+    result = Mock()
+    result.mappings.return_value.first.return_value = {"role": "viewer"}
+    db.execute.return_value = result
+
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        dependencies.get_authenticated_user,
+        lambda: SimpleNamespace(
+            id=UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+        ),
+    )
+
+    response = asyncio.run(
+        request(
+            "POST",
+            f"/api/v1/tenants/{TENANT_ID}/devices/{DEVICE_ID}/commands",
+            json={
+                "command_type": "relay.set",
+                "parameters": {"relay": 1, "state": "off"},
+                "idempotency_key": "viewer-must-not-create",
+            },
+        )
+    )
+
+    assert response.status_code == 403
+
+
+def test_user_without_tenant_membership_cannot_read_history(
+    command_client, monkeypatch
+):
+    from types import SimpleNamespace
+    from app.api import dependencies
+
+    db, request = command_client
+    result = Mock()
+    result.mappings.return_value.first.return_value = None
+    db.execute.return_value = result
+
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        dependencies.get_authenticated_user,
+        lambda: SimpleNamespace(
+            id=UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+        ),
+    )
+
+    response = asyncio.run(
+        request(
+            "GET",
+            f"/api/v1/tenants/{TENANT_ID}/devices/{DEVICE_ID}/commands",
+        )
+    )
+
+    assert response.status_code == 403
+
+
+def test_event_ownership_rejection_maps_to_404(
+    command_client, monkeypatch
+):
+    db, request = command_client
+    identity = DeviceIdentity(tenant_id=TENANT_ID, device_id=DEVICE_ID)
+
+    monkeypatch.setattr(
+        commands_api,
+        "authenticate_device",
+        Mock(return_value=identity),
+    )
+    record_event = Mock(side_effect=commands_api.CommandNotFound())
+    monkeypatch.setattr(
+        commands_api, "record_command_event", record_event
+    )
+
+    response = asyncio.run(
+        request(
+            "POST",
+            f"/api/v1/commands/{COMMAND_ID}/events",
+            token="test-device-token",
+            json={
+                "event_id": "ownership-rejection-test",
+                "event_type": "acknowledged",
+            },
+        )
+    )
+
+    assert response.status_code == 404
+    record_event.assert_called_once()
+    assert record_event.call_args.args[1] == identity
+    assert record_event.call_args.args[2] == COMMAND_ID

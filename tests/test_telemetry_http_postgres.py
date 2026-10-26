@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
-from app.db.session import engine
+from app.db.session import get_db
 from app.main import app
 from app.security.device_auth import generate_device_token
 
@@ -28,14 +28,42 @@ def owner_engine():
         test_engine.dispose()
 
 
+
+
+@pytest.fixture(scope="module")
+def app_engine():
+    from dotenv import load_dotenv
+
+    load_dotenv(".env")
+    raw = os.environ.get("SMARTFARM_DATABASE_URL")
+    assert raw, "Runtime database URL is not configured"
+    url = make_url(raw)
+    assert url.database == "smartfarm", "Unexpected runtime DB target"
+
+    test_engine = create_engine(
+        url.set(database="smartfarm_test"),
+        pool_pre_ping=True,
+    )
+    try:
+        with test_engine.connect() as conn:
+            database, role = conn.execute(
+                text("SELECT current_database(), current_user")
+            ).one()
+        assert database == "smartfarm_test", f"Unsafe test database: {database}"
+        assert role == "smartfarm_app", f"Unexpected runtime role: {role}"
+        yield test_engine
+    finally:
+        test_engine.dispose()
+
+
 @pytest.fixture(autouse=True)
-def require_test_database():
-    with engine.connect() as conn:
+def require_test_database(app_engine):
+    with app_engine.connect() as conn:
         database, role = conn.execute(
             text("SELECT current_database(), current_user")
         ).one()
-    assert database == "smartfarm_test"
-    assert role == "smartfarm_app"
+    assert database == "smartfarm_test", f"Unsafe test database: {database}"
+    assert role == "smartfarm_app", f"Unexpected runtime role: {role}"
 
 
 @pytest.fixture
@@ -146,8 +174,24 @@ def device_setup(owner_engine):
 
 
 @pytest.fixture
-def http_client():
-    import asyncio
+def http_client(app_engine):
+    from sqlalchemy.orm import sessionmaker
+
+    TestingSession = sessionmaker(
+        bind=app_engine,
+        autoflush=False,
+        autocommit=False,
+    )
+
+    def override_get_db():
+        db = TestingSession()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    previous = app.dependency_overrides.get(get_db)
+    app.dependency_overrides[get_db] = override_get_db
 
     class SyncASGIClient:
         def request(self, method, url, **kwargs):
@@ -159,6 +203,7 @@ def http_client():
                 ) as client:
                     return await client.request(method, url, **kwargs)
 
+            import asyncio
             return asyncio.run(send())
 
         def post(self, url, **kwargs):
@@ -167,8 +212,13 @@ def http_client():
         def get(self, url, **kwargs):
             return self.request("GET", url, **kwargs)
 
-    return SyncASGIClient()
-
+    try:
+        yield SyncASGIClient()
+    finally:
+        if previous is None:
+            app.dependency_overrides.pop(get_db, None)
+        else:
+            app.dependency_overrides[get_db] = previous
 
 def send(client, setup, payload=None):
     return client.post(

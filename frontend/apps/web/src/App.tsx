@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
-import { ApiError, commandApi, deviceApi, farmApi } from "./services/api";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ApiError, authApi, commandApi, deviceApi, farmApi, zoneApi } from "./services/api";
+import type { TenantAccess } from "./services/api";
 import type { DeviceCommand } from "./services/api";
 import type { Device } from "./services/api";
+import type { Zone } from "./services/api";
 
 async function copyTextToClipboard(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
@@ -150,6 +152,20 @@ export default function App() {
   const [selectedRange, setSelectedRange] = useState("24 ชั่วโมง");
   const [selectedVariable, setSelectedVariable] = useState("อุณหภูมิ");
   const [zoneSearch, setZoneSearch] = useState("");
+
+  const [zones, setZones] = useState<Zone[]>([]);
+  const [zonesLoading, setZonesLoading] = useState(false);
+  const [zonesError, setZonesError] = useState("");
+  const [zonesRequested, setZonesRequested] = useState(false);
+  const [zonesReloadKey, setZonesReloadKey] = useState(0);
+  const [zoneName, setZoneName] = useState("");
+  const [zoneDescription, setZoneDescription] = useState("");
+  const [zoneStatus, setZoneStatus] = useState<"active" | "disabled">("active");
+  const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
+  const [zoneSaving, setZoneSaving] = useState(false);
+  const [zoneFormError, setZoneFormError] = useState("");
+  const [zoneActionMessage, setZoneActionMessage] = useState("");
+
   const [selectedZoneTab, setSelectedZoneTab] = useState("overview");
   const [tenantId, setTenantId] = useState(() => {
     try {
@@ -174,6 +190,10 @@ export default function App() {
       return [];
     }
   });
+  const [authorizedTenants, setAuthorizedTenants] = useState<TenantAccess[]>([]);
+  const [tenantListLoading, setTenantListLoading] = useState(true);
+  const [tenantListError, setTenantListError] = useState("");
+
   const [farms, setFarms] = useState<
     { id: string; name: string; timezone: string; created_at: string; updated_at: string }[]
   >([]);
@@ -189,11 +209,27 @@ export default function App() {
   const [copiedField, setCopiedField] = useState("");
 
 const [relayBusyKey, setRelayBusyKey] = useState("");
+const [relayPanelsOpen, setRelayPanelsOpen] = useState<Record<string, boolean>>({});
 const [relayMessages, setRelayMessages] = useState<Record<string, string>>({});
 const [relayErrors, setRelayErrors] = useState<Record<string, string>>({});
+const [relayReportedStates, setRelayReportedStates] = useState<Record<string, "on" | "off" | "unknown">>({});
 const [commandHistories, setCommandHistories] = useState<Record<string, DeviceCommand[]>>({});
 const [commandHistoryLoading, setCommandHistoryLoading] = useState<Record<string, boolean>>({});
 const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, string>>({});
+
+// Invalidate asynchronous operations when the selected tenant changes.
+const tenantContextRef = useRef(tenantId.trim());
+const relayOperationRef = useRef(0);
+const historyOperationRef = useRef<Record<string, number>>({});
+const historySequenceRef = useRef(0);
+
+useLayoutEffect(() => {
+  tenantContextRef.current = tenantId.trim();
+  relayOperationRef.current += 1;
+  historyOperationRef.current = {};
+  setRelayBusyKey("");
+  setCommandHistoryLoading({});
+}, [tenantId]);
 
   const [selectedFarm, setSelectedFarm] = useState<{
     id: string; name: string; timezone: string;
@@ -213,49 +249,100 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
 
 
   useEffect(() => {
-    if (selectedPage !== "farms" || !tenantId.trim()) {
+    let cancelled = false;
+
+    authApi.tenants()
+      .then((items) => {
+        if (cancelled) return;
+
+        const validItems = items.filter(
+          (item) =>
+            isTenantUuid(item.id) &&
+            typeof item.name === "string" &&
+            ["owner", "operator", "viewer"].includes(item.role),
+        );
+        setAuthorizedTenants(validItems);
+        setTenantListError("");
+
+        const savedId = tenantId.trim().toLowerCase();
+        const saved = validItems.find(
+          (item) => item.id.toLowerCase() === savedId,
+        );
+
+        if (saved) {
+          setTenantId(saved.id);
+        } else if (validItems.length === 1) {
+          setTenantId(validItems[0].id);
+        } else {
+          setTenantId("");
+          try {
+            localStorage.removeItem("smartfarm.selectedTenantId");
+          } catch {
+            // Storage is optional.
+          }
+        }
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setAuthorizedTenants([]);
+        setTenantListError(
+          error instanceof Error
+            ? error.message
+            : "ไม่สามารถโหลดรายการ Tenant จากเซิร์ฟเวอร์ได้",
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setTenantListLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      selectedPage !== "farms" ||
+      tenantListLoading
+    ) {
       setFarms([]);
       setFarmsError("");
       setFarmsRequested(false);
+      setFarmsLoading(false);
       return;
     }
 
-    if (!isTenantUuid(tenantId)) {
+    const authorizedTenant = authorizedTenants.find(
+      (item) =>
+        item.id.toLowerCase() === tenantId.trim().toLowerCase(),
+    );
+
+    if (!authorizedTenant) {
       setFarms([]);
-      setFarmsError("Tenant ID ต้องเป็น UUID รูปแบบเต็ม");
+      setFarmsError("");
       setFarmsRequested(false);
       setFarmsLoading(false);
       return;
     }
 
     let cancelled = false;
+    setFarms([]);
     setFarmsLoading(true);
     setFarmsError("");
     setFarmsRequested(true);
 
-    farmApi.list(tenantId.trim())
+    farmApi.list(authorizedTenant.id)
       .then((result) => {
-        if (!cancelled) {
-          setFarms(result);
-          try {
-            localStorage.setItem("smartfarm.selectedTenantId", tenantId.trim());
-            setTenantHistory((previous) => {
-              const next = [
-                tenantId.trim(),
-                ...previous.filter(
-                  (value) => value.toLowerCase() !== tenantId.trim().toLowerCase(),
-                ),
-              ].slice(0, 10);
-              try {
-                localStorage.setItem("smartfarm.tenantHistory", JSON.stringify(next));
-              } catch {
-                // Keep the current session usable if storage is unavailable.
-              }
-              return next;
-            });
-          } catch {
-            // Keep the current session usable if storage is unavailable.
-          }
+        if (cancelled) return;
+
+        setFarms(result);
+        try {
+          localStorage.setItem(
+            "smartfarm.selectedTenantId",
+            authorizedTenant.id,
+          );
+        } catch {
+          // Storage is optional.
         }
       })
       .catch((error: unknown) => {
@@ -274,32 +361,105 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
     return () => {
       cancelled = true;
     };
-  }, [selectedPage, tenantId, farmsReloadKey]);
+  }, [
+    selectedPage,
+    tenantId,
+    farmsReloadKey,
+    authorizedTenants,
+    tenantListLoading,
+  ]);
+
+
+  useEffect(() => {
+    let cancelled = false;
+    const authorizedTenant = authorizedTenants.find(
+      (item) => item.id.toLowerCase() === tenantId.trim().toLowerCase(),
+    );
+    const farmId = selectedFarm?.id;
+
+    if (
+      selectedPage !== "zones" ||
+      tenantListLoading ||
+      !authorizedTenant ||
+      !farmId
+    ) {
+      setZones([]);
+      setZonesError("");
+      setZonesRequested(false);
+      setZonesLoading(false);
+      return;
+    }
+
+    setZones([]);
+    setZonesError("");
+    setZonesLoading(true);
+    setZonesRequested(true);
+
+    zoneApi.list(authorizedTenant.id, farmId, zoneSearch)
+      .then((items) => {
+        if (!cancelled) setZones(items);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setZones([]);
+        setZonesError(
+          error instanceof Error
+            ? error.message
+            : "ไม่สามารถโหลดรายการโซนได้",
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setZonesLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    selectedPage,
+    tenantId,
+    selectedFarm?.id,
+    zoneSearch,
+    zonesReloadKey,
+    authorizedTenants,
+    tenantListLoading,
+  ]);
+
+  const authorizedDeviceTenant = authorizedTenants.find(
+    (item) => item.id.toLowerCase() === tenantId.trim().toLowerCase(),
+  );
 
   useEffect(() => {
     if (selectedPage !== "devices") {
       return;
     }
 
-    if (!tenantId.trim()) {
+    if (tenantListLoading) {
+      return;
+    }
+
+    if (!authorizedDeviceTenant) {
       setDevices([]);
       setDevicesError("");
       setDevicesRequested(false);
       setDevicesLoading(false);
-      return;
-    }
-
-    if (!isTenantUuid(tenantId.trim())) {
-      setDevices([]);
-      setDevicesError("Tenant ID ต้องเป็น UUID รูปแบบเต็ม");
-      setDevicesRequested(false);
-      setDevicesLoading(false);
+      setRelayReportedStates({});
+      setRelayErrors({});
+      setRelayMessages({});
+      setCommandHistories({});
+      setCommandHistoryErrors({});
       return;
     }
 
     let cancelled = false;
-    const requestedTenantId = tenantId.trim();
+    const requestedTenantId = authorizedDeviceTenant.id;
 
+    // Clear stale state before loading devices for the selected tenant.
+    setRelayReportedStates({});
+    setRelayErrors({});
+    setRelayMessages({});
+    setCommandHistories({});
+    setCommandHistoryErrors({});
     setDevicesLoading(true);
     setDevicesError("");
     setDevicesRequested(true);
@@ -309,6 +469,79 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
         if (cancelled) return;
 
         setDevices(result);
+
+        // Restore reported relay states from authorized command history.
+        void Promise.all(
+          result.map(async (device) => {
+            try {
+              const history = await commandApi.history(
+                requestedTenantId,
+                device.id,
+                100,
+              );
+              return { device, history, error: "" };
+            } catch (error) {
+              return {
+                device,
+                history: null,
+                error: error instanceof Error
+                  ? error.message
+                  : "โหลดประวัติคำสั่งไม่สำเร็จ",
+              };
+            }
+          }),
+        ).then((results) => {
+          if (cancelled) return;
+
+          const restoredStates: Record<
+            string,
+            "on" | "off" | "unknown"
+          > = {};
+          const restoredHistories: Record<string, DeviceCommand[]> = {};
+          const restoredErrors: Record<string, string> = {};
+          const restoredRelayErrors: Record<string, string> = {};
+
+          for (const { device, history, error } of results) {
+            if (history === null) {
+              restoredErrors[device.id] = error;
+              for (const relay of [1, 2, 3, 4]) {
+                restoredStates[`${device.id}:${relay}`] = "unknown";
+              }
+              continue;
+            }
+
+            restoredHistories[device.id] = history.commands;
+
+            for (const relay of [1, 2, 3, 4]) {
+              const key = `${device.id}:${relay}`;
+              // API history is newest-first. Do not fall back to an older
+              // successful command if a newer command failed or is pending.
+              const latestCommand = history.commands.find(
+                (command) =>
+                  command.command_type === "relay.set" &&
+                  command.parameters?.relay === relay,
+              );
+
+              restoredStates[key] =
+                latestCommand?.status === "succeeded" &&
+                (latestCommand.parameters?.state === "on" ||
+                  latestCommand.parameters?.state === "off")
+                  ? latestCommand.parameters.state
+                  : "unknown";
+
+              restoredRelayErrors[key] =
+                latestCommand &&
+                ["failed", "expired"].includes(latestCommand.status)
+                  ? `คำสั่ง Relay สิ้นสุดด้วยสถานะ ${latestCommand.status}`
+                  : "";
+            }
+          }
+
+          setRelayReportedStates(restoredStates);
+          setRelayErrors(restoredRelayErrors);
+          setCommandHistories(restoredHistories);
+          setCommandHistoryErrors(restoredErrors);
+        });
 
         try {
           localStorage.setItem(
@@ -357,9 +590,29 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
     return () => {
       cancelled = true;
     };
-  }, [selectedPage, tenantId, devicesReloadKey]);
+  }, [selectedPage, tenantId, authorizedTenants, tenantListLoading, devicesReloadKey]);
 
   const page = pageTitles[selectedPage] ?? pageTitles.dashboard;
+
+  // The shared top bar reports only API loading outcomes that this page tracks.
+  const topbarDataStatus =
+    selectedPage === "farms"
+      ? farmsLoading
+        ? { label: "กำลังโหลดข้อมูล", tone: "loading" }
+        : farmsError
+          ? { label: "โหลดข้อมูลไม่สำเร็จ", tone: "error" }
+          : farmsRequested
+            ? { label: "โหลดข้อมูลสำเร็จ", tone: "success" }
+            : { label: "ยังไม่มีผลตรวจสอบข้อมูล", tone: "unknown" }
+      : selectedPage === "devices"
+        ? devicesLoading
+          ? { label: "กำลังโหลดข้อมูล", tone: "loading" }
+          : devicesError
+            ? { label: "โหลดข้อมูลไม่สำเร็จ", tone: "error" }
+            : devicesRequested
+              ? { label: "โหลดข้อมูลสำเร็จ", tone: "success" }
+              : { label: "ยังไม่มีผลตรวจสอบข้อมูล", tone: "unknown" }
+        : { label: "ยังไม่มีผลตรวจสอบข้อมูล", tone: "unknown" };
 
   function navigate(id: string) {
     setSelectedPage(id);
@@ -458,9 +711,17 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
           </div>
 
           <div className="topbar-actions">
-            <span className="connection-pill">
-              <span className="status-dot status-dot-muted" />
-              รอเชื่อมต่อข้อมูล
+            <span
+              className={`connection-pill connection-pill-${topbarDataStatus.tone}`}
+              role="status"
+              aria-live="polite"
+            >
+              <span className={`status-dot ${
+                topbarDataStatus.tone === "success"
+                  ? "status-dot-success"
+                  : "status-dot-muted"
+              }`} />
+              {topbarDataStatus.label}
             </span>
             <button
               className="icon-button notification-button"
@@ -718,118 +979,74 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                 <div className="section-heading">
                   <div>
                     <h2>รายการฟาร์ม</h2>
-                    <p>ข้อมูลจาก Farm API ตามสิทธิ์ของ Tenant ที่ระบุ</p>
+                    <p>ข้อมูลฟาร์มของ Tenant ที่บัญชีได้รับอนุญาต</p>
                   </div>
                   <span className="section-note">
                     <span className={`status-dot ${farmsError ? "status-dot-muted" : ""}`} />
-                    {farmsLoading ? "กำลังโหลด" : farmsError ? "โหลดข้อมูลไม่สำเร็จ" : farmsRequested ? "เชื่อมต่อ API แล้ว" : "รอ Tenant ID"}
+                    {farmsLoading ? "กำลังโหลด" : farmsError ? "โหลดข้อมูลไม่สำเร็จ" : farmsRequested ? "เชื่อมต่อ API แล้ว" : "รอเลือก Tenant"}
                   </span>
                 </div>
 
-                <form
-                  className="farm-tenant-form"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    const input = event.currentTarget.querySelector("input");
-                    if (input) {
-                      const value = input.value.trim();
-                      setTenantId(value);
-                      if (value) setFarmsReloadKey((key) => key + 1);
+                <div className="farm-tenant-form">
+                  <label htmlFor="farm-tenant-select">
+                    Tenant ที่ได้รับอนุญาต
+                  </label>
+                  <select
+                    id="farm-tenant-select"
+                    aria-label="เลือก Tenant ที่บัญชีมีสิทธิ์"
+                    value={
+                      authorizedTenants.some(
+                        (item) =>
+                          item.id.toLowerCase() ===
+                          tenantId.trim().toLowerCase(),
+                      )
+                        ? authorizedTenants.find(
+                            (item) =>
+                              item.id.toLowerCase() ===
+                              tenantId.trim().toLowerCase(),
+                          )?.id ?? ""
+                        : ""
                     }
-                  }}
-                >
-                  <label htmlFor="farm-tenant-id">Tenant ID</label>
-                  <div className="farm-tenant-controls">
-                    <input
-                      id="farm-tenant-id"
-                      type="text"
-                      value={tenantId}
-                      onChange={(event) => setTenantId(event.target.value)}
-                      placeholder="ระบุ Tenant ID ที่บัญชีนี้มีสิทธิ์เข้าถึง"
-                      autoComplete="off"
-                      required
-                    />
-                    <button className="primary-button" type="submit" disabled={farmsLoading || !isTenantUuid(tenantId)}>
-                      {farmsLoading ? "กำลังโหลด…" : "โหลดรายการฟาร์ม"}
-                    </button>
-                  </div>
-                  <p className="farm-helper-text">
-                    ใช้ Tenant ID ที่ได้รับอนุญาตเท่านั้น ระบบจะส่ง Access Token ผ่าน API service เดิม
-                  </p>
-                </form>
+                    onChange={(event) => {
+                      setTenantId(event.target.value);
+                      setSelectedFarm(null);
+                      setCopiedField("");
+                    }}
+                    disabled={
+                      tenantListLoading ||
+                      authorizedTenants.length === 0
+                    }
+                  >
+                    <option value="">
+                      {tenantListLoading
+                        ? "กำลังโหลด Tenant..."
+                        : "เลือก Tenant ที่ได้รับอนุญาต"}
+                    </option>
+                    {authorizedTenants.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name} — {item.role}
+                      </option>
+                    ))}
+                  </select>
 
-                <div className="tenant-history-panel">
-                  <div className="tenant-history-heading">
-                    <strong>ประวัติ Tenant ID</strong>
-                    <span>{tenantHistory.length}/10 รายการ</span>
-                  </div>
-                  {tenantHistory.length > 0 ? (
-                    <div className="tenant-history-list">
-                      {tenantHistory.map((savedTenantId) => (
-                        <button
-                          key={savedTenantId}
-                          className={`tenant-history-item ${
-                            tenantId.toLowerCase() === savedTenantId.toLowerCase()
-                              ? "active"
-                              : ""
-                          }`}
-                          type="button"
-                          onClick={() => {
-                            setTenantId(savedTenantId);
-                            setFarmsReloadKey((key) => key + 1);
-                          }}
-                          title={savedTenantId}
-                        >
-                          <span>{formatTenantDisplayId(savedTenantId)}</span>
-                          {tenantId.toLowerCase() === savedTenantId.toLowerCase()
-                            ? <span>กำลังเลือก</span>
-                            : <span>เลือก Tenant</span>}
-                        </button>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="farm-helper-text">
-                      ประวัติจะปรากฏหลังโหลดรายการฟาร์มสำเร็จ
+                  {tenantListError && (
+                    <p className="farm-helper-text" role="alert">
+                      โหลดรายการ Tenant ไม่สำเร็จ: {tenantListError}
                     </p>
                   )}
-                  <div className="tenant-history-actions">
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      disabled={!tenantId}
-                      onClick={() => {
-                        try {
-                          localStorage.removeItem("smartfarm.selectedTenantId");
-                        } catch {
-                          // Continue clearing the in-memory selection.
-                        }
-                        setTenantId("");
-                        setFarms([]);
-                        setFarmsError("");
-                        setFarmsRequested(false);
-                        setFarmsLoading(false);
-                        setSelectedFarm(null);
-                        setCopiedField("");
-                      }}
-                    >
-                      ยกเลิกการเลือก Tenant
-                    </button>
-                    <button
-                      className="farm-copy-button"
-                      type="button"
-                      disabled={tenantHistory.length === 0}
-                      onClick={() => {
-                        try {
-                          localStorage.removeItem("smartfarm.tenantHistory");
-                        } catch {
-                          // Continue clearing the in-memory history.
-                        }
-                        setTenantHistory([]);
-                      }}
-                    >
-                      ล้างประวัติ
-                    </button>
-                  </div>
+
+                  {!tenantListLoading &&
+                    !tenantListError &&
+                    authorizedTenants.length === 0 && (
+                      <p className="farm-helper-text" role="status">
+                        ไม่พบ Tenant ที่บัญชีนี้ได้รับอนุญาต
+                      </p>
+                    )}
+
+                  <p className="farm-helper-text">
+                    เลือก Tenant จากรายการที่บัญชีได้รับอนุญาต
+                    ระบบใช้ Access Token ผ่าน API service เดิม
+                  </p>
                 </div>
 
                 {farmsError && (
@@ -1012,8 +1229,8 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                     <p>จัดการโซนเพาะปลูกภายในฟาร์มที่เลือก</p>
                   </div>
                   <span className="section-note">
-                    <span className="status-dot status-dot-muted" />
-                    ยังไม่เชื่อมต่อ Zone API
+                    <span className={`status-dot ${zonesError ? "status-dot-muted" : ""}`} />
+                    {zonesLoading ? "กำลังโหลด" : zonesError ? "โหลดข้อมูลไม่สำเร็จ" : zonesRequested ? "เชื่อมต่อ Zone API แล้ว" : "รอ Tenant และ Farm"}
                   </span>
                 </div>
 
@@ -1022,21 +1239,11 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                     <span className="zone-context-icon" aria-hidden="true">⌂</span>
                     <div>
                       <span className="zone-context-label">ฟาร์มที่เลือก</span>
-                      <strong>
-                        {selectedFarm ? selectedFarm.name : "ยังไม่ได้เลือกฟาร์ม"}
-                      </strong>
-                      <small>
-                        {selectedFarm
-                          ? selectedFarm.timezone
-                          : "เลือกฟาร์มก่อนเพื่อดูบริบทการจัดการโซน"}
-                      </small>
+                      <strong>{selectedFarm?.name ?? "ยังไม่ได้เลือกฟาร์ม"}</strong>
+                      <small>{selectedFarm?.timezone ?? "เลือกฟาร์มก่อนเพื่อดูและจัดการโซน"}</small>
                     </div>
                   </div>
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    onClick={() => navigate("farms")}
-                  >
+                  <button className="secondary-button" type="button" onClick={() => navigate("farms")}>
                     {selectedFarm ? "เปลี่ยนฟาร์ม" : "ไปยัง Farm Management"}
                   </button>
                 </div>
@@ -1044,6 +1251,8 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                 <div className="zone-tenant-context">
                   <span>Tenant</span>
                   <code>{formatTenantDisplayId(tenantId)}</code>
+                  <span>สิทธิ์</span>
+                  <strong>{authorizedTenants.find((item) => item.id.toLowerCase() === tenantId.trim().toLowerCase())?.role ?? "ไม่มีสิทธิ์"}</strong>
                 </div>
 
                 <label className="zone-search-field">
@@ -1055,25 +1264,212 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                     onChange={(event) => setZoneSearch(event.target.value)}
                     placeholder="ค้นหาชื่อโซน"
                     aria-label="ค้นหาชื่อโซน"
+                    disabled={!selectedFarm}
                   />
                 </label>
 
-                <div className="zone-list-empty">
-                  <span className="zone-empty-symbol" aria-hidden="true">▦</span>
-                  <h3>
-                    {zoneSearch.trim()
-                      ? "ยังไม่สามารถค้นหาโซนได้"
-                      : "ยังไม่มีข้อมูลโซนจากระบบ"}
-                  </h3>
-                  <p>
-                    {zoneSearch.trim()
-                      ? "ช่องค้นหาพร้อมใช้งานเมื่อเชื่อมต่อ Zone API และมีรายการโซนจริง"
-                      : "ขณะนี้ Backend ยังไม่มี Zone API สำหรับดึงรายการโซน จึงยังไม่สามารถแสดงหรือจัดการโซนจริงได้"}
-                  </p>
-                  <span className="zone-api-notice">
-                    ไม่มีการสร้างข้อมูลจำลองหรือส่งคำขอไปยัง API ที่ยังไม่รองรับ
-                  </span>
-                </div>
+                {(() => {
+                  const role = authorizedTenants.find(
+                    (item) => item.id.toLowerCase() === tenantId.trim().toLowerCase(),
+                  )?.role;
+                  const canManage = role === "owner" || role === "operator";
+                  return (
+                    <>
+                      {canManage && selectedFarm && (
+                        <form
+                          className="zone-form"
+                          onSubmit={async (event) => {
+                            event.preventDefault();
+                            if (!selectedFarm || !canManage || zoneSaving) return;
+                            const name = zoneName.trim();
+                            if (!name) {
+                              setZoneFormError("กรุณาระบุชื่อโซน");
+                              return;
+                            }
+                            setZoneSaving(true);
+                            setZoneFormError("");
+                            setZoneActionMessage("");
+                            try {
+                              const payload = {
+                                name,
+                                description: zoneDescription.trim() || null,
+                                status: zoneStatus,
+                              };
+                              if (editingZoneId) {
+                                await zoneApi.update(tenantId, selectedFarm.id, editingZoneId, payload);
+                                setZoneActionMessage("บันทึกการแก้ไขโซนแล้ว");
+                              } else {
+                                await zoneApi.create(tenantId, selectedFarm.id, payload);
+                                setZoneActionMessage("สร้างโซนแล้ว");
+                              }
+                              setZoneName("");
+                              setZoneDescription("");
+                              setZoneStatus("active");
+                              setEditingZoneId(null);
+                              setZonesReloadKey((key) => key + 1);
+                            } catch (error) {
+                              setZoneFormError(error instanceof Error ? error.message : "บันทึกข้อมูลโซนไม่สำเร็จ");
+                            } finally {
+                              setZoneSaving(false);
+                            }
+                          }}
+                        >
+                          <h3>{editingZoneId ? "แก้ไขโซน" : "เพิ่มโซนใหม่"}</h3>
+                          <label>
+                            ชื่อโซน
+                            <input
+                              value={zoneName}
+                              onChange={(event) => setZoneName(event.target.value)}
+                              maxLength={120}
+                              required
+                              disabled={zoneSaving}
+                              placeholder="เช่น Greenhouse A"
+                            />
+                          </label>
+                          <label>
+                            คำอธิบาย
+                            <textarea
+                              value={zoneDescription}
+                              onChange={(event) => setZoneDescription(event.target.value)}
+                              maxLength={500}
+                              rows={2}
+                              disabled={zoneSaving}
+                              placeholder="รายละเอียดเพิ่มเติม (ไม่บังคับ)"
+                            />
+                          </label>
+                          <label>
+                            สถานะ
+                            <select
+                              value={zoneStatus}
+                              onChange={(event) => setZoneStatus(event.target.value as "active" | "disabled")}
+                              disabled={zoneSaving}
+                            >
+                              <option value="active">เปิดใช้งาน</option>
+                              <option value="disabled">ปิดใช้งาน</option>
+                            </select>
+                          </label>
+                          {zoneFormError && <p className="farm-message-error" role="alert">{zoneFormError}</p>}
+                          <div className="zone-form-actions">
+                            <button className="primary-button" type="submit" disabled={zoneSaving}>
+                              {zoneSaving ? "กำลังบันทึก…" : editingZoneId ? "บันทึกการแก้ไข" : "สร้างโซน"}
+                            </button>
+                            {editingZoneId && (
+                              <button
+                                className="secondary-button"
+                                type="button"
+                                disabled={zoneSaving}
+                                onClick={() => {
+                                  setEditingZoneId(null);
+                                  setZoneName("");
+                                  setZoneDescription("");
+                                  setZoneStatus("active");
+                                  setZoneFormError("");
+                                }}
+                              >ยกเลิก</button>
+                            )}
+                          </div>
+                        </form>
+                      )}
+
+                      {zoneActionMessage && <div className="farm-message" role="status">{zoneActionMessage}</div>}
+                      {zonesError && (
+                        <div className="farm-message farm-message-error" role="alert">
+                          <strong>ไม่สามารถโหลดรายการโซน</strong>
+                          <p>{zonesError}</p>
+                          <button className="secondary-button" type="button" onClick={() => setZonesReloadKey((key) => key + 1)}>ลองอีกครั้ง</button>
+                        </div>
+                      )}
+                      {zonesLoading && <div className="farm-message" role="status">กำลังโหลดข้อมูลโซนจาก API…</div>}
+                      {!tenantListLoading && !authorizedTenants.some((item) => item.id.toLowerCase() === tenantId.trim().toLowerCase()) && (
+                        <div className="farm-list-empty">
+                          <h3>กรุณาเลือก Tenant ที่ได้รับอนุญาต</h3>
+                          <p>ไปยัง Farm Management เพื่อเลือก Tenant ที่บัญชีเข้าถึงได้</p>
+                        </div>
+                      )}
+                      {!selectedFarm && (
+                        <div className="farm-list-empty">
+                          <h3>ยังไม่ได้เลือกฟาร์ม</h3>
+                          <p>เลือกรายการฟาร์มก่อน แล้วกลับมาจัดการโซน</p>
+                          <button className="primary-button" type="button" onClick={() => navigate("farms")}>ไปยัง Farm Management</button>
+                        </div>
+                      )}
+                      {!zonesLoading && !zonesError && selectedFarm && zonesRequested && zones.length === 0 && (
+                        <div className="zone-list-empty">
+                          <span className="zone-empty-symbol" aria-hidden="true">▦</span>
+                          <h3>{zoneSearch.trim() ? "ไม่พบโซนที่ตรงกับคำค้นหา" : "ยังไม่มีโซนในฟาร์มนี้"}</h3>
+                          <p>{canManage ? "เพิ่มโซนผ่านแบบฟอร์มด้านบนได้" : "บัญชีนี้มีสิทธิ์ดูข้อมูลเท่านั้น"}</p>
+                        </div>
+                      )}
+                      {!zonesLoading && !zonesError && zones.length > 0 && (
+                        <div className="zone-list" aria-label="รายการโซน">
+                          {zones.map((zone) => (
+                            <article className="zone-card" key={zone.id}>
+                              <div className="zone-card-main">
+                                <div className="zone-card-heading">
+                                  <h3>{zone.name}</h3>
+                                  <span className={`zone-status ${zone.status === "active" ? "zone-status-active" : "zone-status-disabled"}`}>
+                                    {zone.status === "active" ? "เปิดใช้งาน" : "ปิดใช้งาน"}
+                                  </span>
+                                </div>
+                                <p>{zone.description || "ไม่มีคำอธิบาย"}</p>
+                                <small>แก้ไขล่าสุด {formatThaiDate(zone.updated_at)}</small>
+                              </div>
+                              {canManage && (
+                                <div className="zone-card-actions">
+                                  <button
+                                    className="secondary-button"
+                                    type="button"
+                                    disabled={zoneSaving}
+                                    onClick={() => {
+                                      setEditingZoneId(zone.id);
+                                      setZoneName(zone.name);
+                                      setZoneDescription(zone.description ?? "");
+                                      setZoneStatus(zone.status);
+                                      setZoneFormError("");
+                                      setZoneActionMessage("");
+                                    }}
+                                  >แก้ไข</button>
+                                  <button
+                                    className="secondary-button zone-delete-button"
+                                    type="button"
+                                    disabled={zoneSaving}
+                                    onClick={async () => {
+                                      if (!window.confirm(`ยืนยันลบโซน "${zone.name}" หรือไม่?`)) return;
+                                      setZoneSaving(true);
+                                      setZoneFormError("");
+                                      setZoneActionMessage("");
+                                      try {
+                                        if (!selectedFarm) {
+                                            setZonesError("กรุณาเลือกฟาร์มก่อนดำเนินการ");
+                                            return;
+                                        }
+                                        await zoneApi.delete(tenantId, selectedFarm.id, zone.id);
+                                        if (editingZoneId === zone.id) {
+                                          setEditingZoneId(null);
+                                          setZoneName("");
+                                          setZoneDescription("");
+                                        }
+                                        setZoneActionMessage("ลบโซนแล้ว");
+                                        setZonesReloadKey((key) => key + 1);
+                                      } catch (error) {
+                                        setZoneFormError(error instanceof Error ? error.message : "ลบโซนไม่สำเร็จ");
+                                      } finally {
+                                        setZoneSaving(false);
+                                      }
+                                    }}
+                                  >ลบ</button>
+                                </div>
+                              )}
+                            </article>
+                          ))}
+                        </div>
+                      )}
+                      {role === "viewer" && selectedFarm && (
+                        <p className="farm-helper-text">สิทธิ์ Viewer: สามารถดูและค้นหาโซนได้ แต่ไม่สามารถสร้าง แก้ไข หรือลบ</p>
+                      )}
+                    </>
+                  );
+                })()}
               </section>
             </div>
           ) : selectedPage === "devices" ? (
@@ -1082,87 +1478,30 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                 <div className="section-heading">
                   <div>
                     <h2>รายการอุปกรณ์</h2>
-                    <p>ข้อมูลจาก Device API ตามสิทธิ์ของ Tenant ที่ระบุ</p>
+                    <p>ข้อมูลจาก Device API ตามสิทธิ์ของ Tenant ที่ได้รับอนุญาต</p>
                   </div>
                   <span className="section-note">
                     <span className={`status-dot ${devicesError ? "status-dot-muted" : ""}`} />
-                    {devicesLoading
-                      ? "กำลังโหลด"
-                      : devicesError
-                        ? "โหลดข้อมูลไม่สำเร็จ"
-                        : devicesRequested
-                          ? "เชื่อมต่อ API แล้ว"
-                          : "รอ Tenant ID"}
+                    {devicesLoading ? "กำลังโหลด" : devicesError ? "โหลดข้อมูลไม่สำเร็จ" : devicesRequested ? "เชื่อมต่อ API แล้ว" : "รอ Tenant ที่ได้รับอนุญาต"}
                   </span>
                 </div>
 
-                <form
-                  className="farm-tenant-form"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    if (!isTenantUuid(tenantId.trim())) return;
-                    setTenantId(tenantId.trim());
-                    setDevicesReloadKey((key) => key + 1);
-                  }}
-                >
-                  <label htmlFor="device-tenant-id">Tenant ID</label>
-                  <div className="farm-tenant-controls">
-                    <input
-                      id="device-tenant-id"
-                      type="text"
-                      value={tenantId}
-                      onChange={(event) => setTenantId(event.target.value)}
-                      placeholder="ระบุ Tenant ID ที่บัญชีนี้มีสิทธิ์เข้าถึง"
-                      autoComplete="off"
-                      required
-                    />
-                    <button
-                      className="primary-button"
-                      type="submit"
-                      disabled={devicesLoading || !isTenantUuid(tenantId.trim())}
-                    >
-                      {devicesLoading ? "กำลังโหลด…" : "โหลดอุปกรณ์"}
-                    </button>
-                  </div>
-                  <p className="farm-helper-text">
-                    ใช้ Tenant ID ที่ได้รับอนุญาต ระบบใช้ Access Token ผ่าน API service เดิม
-                  </p>
-                </form>
-
-                <div className="tenant-history-panel">
-                  <div className="tenant-history-heading">
-                    <strong>ประวัติ Tenant ID</strong>
-                    <span>{tenantHistory.length}/10 รายการ</span>
-                  </div>
-                  {tenantHistory.length > 0 ? (
-                    <div className="tenant-history-list">
-                      {tenantHistory.map((savedTenantId) => (
-                        <button
-                          key={savedTenantId}
-                          className={`tenant-history-item ${
-                            tenantId.toLowerCase() === savedTenantId.toLowerCase()
-                              ? "active"
-                              : ""
-                          }`}
-                          type="button"
-                          onClick={() => {
-                            setTenantId(savedTenantId);
-                            setDevicesReloadKey((key) => key + 1);
-                          }}
-                          title={savedTenantId}
-                        >
-                          <span>{formatTenantDisplayId(savedTenantId)}</span>
-                          <span>
-                            {tenantId.toLowerCase() === savedTenantId.toLowerCase()
-                              ? "กำลังเลือก"
-                              : "เลือก Tenant"}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
+                <div className="device-tenant-context">
+                  {tenantListLoading ? (
+                    <p role="status">กำลังตรวจสอบสิทธิ์ Tenant จากเซิร์ฟเวอร์…</p>
+                  ) : tenantListError ? (
+                    <p className="farm-message farm-message-error" role="alert">
+                      ตรวจสอบสิทธิ์ Tenant ไม่สำเร็จ: {tenantListError}
+                    </p>
+                  ) : authorizedDeviceTenant ? (
+                    <p>
+                      Tenant ปัจจุบัน: <strong>{authorizedDeviceTenant.name}</strong>
+                      {" · "}สิทธิ์ {authorizedDeviceTenant.role}
+                    </p>
                   ) : (
-                    <p className="farm-helper-text">
-                      ประวัติจะปรากฏหลังโหลดข้อมูลจาก API สำเร็จ
+                    <p>
+                      ยังไม่มี Tenant ที่เลือกและได้รับอนุญาต
+                      กรุณาเลือก Tenant ผ่านหน้า Farm Management ก่อน
                     </p>
                   )}
                 </div>
@@ -1176,7 +1515,7 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                   <button
                     className="secondary-button"
                     type="button"
-                    disabled={devicesLoading || !isTenantUuid(tenantId.trim())}
+                    disabled={devicesLoading || !authorizedDeviceTenant}
                     onClick={() => setDevicesReloadKey((key) => key + 1)}
                   >
                     โหลดใหม่
@@ -1199,11 +1538,19 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                 {!devicesError && !devicesLoading && !devicesRequested && (
                   <div className="farm-list-empty">
                     <span className="zone-empty-symbol" aria-hidden="true">▣</span>
-                    <h3>{tenantId.trim() ? "พร้อมโหลดข้อมูลอุปกรณ์" : "กรุณาระบุ Tenant ID"}</h3>
+                    <h3>
+                      {tenantListLoading
+                        ? "กำลังตรวจสอบสิทธิ์"
+                        : authorizedDeviceTenant
+                          ? "พร้อมโหลดข้อมูลอุปกรณ์"
+                          : "กรุณาเลือก Tenant ที่ได้รับอนุญาต"}
+                    </h3>
                     <p>
-                      {tenantId.trim()
-                        ? "ตรวจสอบ Tenant ID แล้วกดโหลดอุปกรณ์"
-                        : "กรอก Tenant ID ที่บัญชีของคุณได้รับอนุญาตให้เข้าถึง"}
+                      {tenantListLoading
+                        ? "รอผลการตรวจสอบสิทธิ์จากเซิร์ฟเวอร์"
+                        : authorizedDeviceTenant
+                          ? "กดโหลดใหม่เพื่อดึงรายการอุปกรณ์"
+                          : "ไปที่ Farm Management เพื่อเลือก Tenant ที่บัญชีของคุณเข้าถึงได้"}
                     </p>
                   </div>
                 )}
@@ -1244,6 +1591,32 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                             </div>
                             <div>
 
+                              <dt>พบล่าสุด</dt>
+                              <dd>
+                                {device.last_seen_at
+                                  ? formatThaiDate(device.last_seen_at)
+                                  : "ยังไม่มีข้อมูล"}
+                              </dd>
+                            </div>
+                            <div>
+                              <dt>Farm ID</dt>
+                              <dd>{device.farm_id ?? "ยังไม่ได้ผูกกับฟาร์ม"}</dd>
+                            </div>
+                          </dl>
+                          <button
+                            type="button"
+                            className="secondary-button relay-panel-toggle"
+                            aria-expanded={Boolean(relayPanelsOpen[device.id])}
+                            onClick={() =>
+                              setRelayPanelsOpen((previous) => ({
+                                ...previous,
+                                [device.id]: !previous[device.id],
+                              }))
+                            }
+                          >
+                            {relayPanelsOpen[device.id] ? "ซ่อนการควบคุม Relay" : "ควบคุม Relay"}
+                          </button>
+                          {relayPanelsOpen[device.id] && (
                           <section className="relay-control-panel" aria-label={`ควบคุม Relay ของ ${device.name}`}>
                             <div className="relay-panel-heading">
                               <h4>ควบคุมรีเลย์</h4>
@@ -1262,15 +1635,35 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                               const busy = relayBusyKey === key;
                               return (
                                 <div className="relay-row" key={relay}>
-                                  <span className="relay-name">Relay {relay}</span>
+                                  <div className="relay-identity">
+                                    <span className="relay-name">Relay {relay}</span>
+                                    <span
+                                      className={`relay-status-led relay-led-${relayErrors[key] ? "error" : relayReportedStates[key] ?? "unknown"}`}
+                                      role="img"
+                                      aria-label={relayErrors[key]
+                                        ? `Relay ${relay} เกิดข้อผิดพลาด`
+                                        : relayReportedStates[key] === "on"
+                                          ? `Relay ${relay} รายงานเปิดสำเร็จ`
+                                          : relayReportedStates[key] === "off"
+                                            ? `Relay ${relay} รายงานปิดสำเร็จ`
+                                            : `Relay ${relay} ยังไม่ทราบสถานะ`}
+                                      title={relayErrors[key] ? "เกิดข้อผิดพลาด" : relayReportedStates[key] === "on" ? "รายงานเปิดสำเร็จ" : relayReportedStates[key] === "off" ? "รายงานปิดสำเร็จ" : "ยังไม่ทราบสถานะ"}
+                                    />
+                                  </div>
                                   <div className="relay-actions">
                                     <button
                                       type="button"
                                       className="relay-button relay-button-on"
-                                      disabled={device.status !== "active" || Boolean(relayBusyKey) || !isTenantUuid(tenantId.trim())}
+                                      disabled={device.status !== "active" || Boolean(relayBusyKey) || !authorizedDeviceTenant}
                                       onClick={async () => {
                                         if (relayBusyKey) return;
+                                        const requestedTenantId = authorizedDeviceTenant?.id ?? "";
+                                        const operationId = ++relayOperationRef.current;
+                                        const isCurrentOperation = () =>
+                                          relayOperationRef.current === operationId &&
+                                          tenantContextRef.current === requestedTenantId;
                                         setRelayBusyKey(key);
+                                        setRelayReportedStates((prev) => ({ ...prev, [key]: "unknown" }));
                                         setRelayErrors((prev) => ({ ...prev, [key]: "" }));
                                         setRelayMessages((prev) => ({ ...prev, [key]: "" }));
                                         try {
@@ -1278,29 +1671,104 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                                             ? crypto.randomUUID()
                                             : `${Date.now()}-${relay}-on`;
                                           const result = await commandApi.createRelayCommand(
-                                            tenantId.trim(), device.id, relay, "on", idempotencyKey
+                                            requestedTenantId, device.id, relay, "on", idempotencyKey
                                           );
+                                          if (!isCurrentOperation()) return;
                                           setRelayMessages((prev) => ({
                                             ...prev,
                                             [key]: `บันทึกคำสั่งเปิดแล้ว (${result.command.status})${result.duplicate ? " · คำสั่งเดิม" : ""} — ยังไม่ยืนยันสถานะฮาร์ดแวร์`,
                                           }));
                                           try {
-                                            const history = await commandApi.history(tenantId.trim(), device.id, 10);
-                                            setCommandHistories((prev) => ({ ...prev, [device.id]: history.commands }));
-                                            setCommandHistoryErrors((prev) => ({ ...prev, [device.id]: "" }));
+                                            let observedCommand: DeviceCommand | undefined;
+                                            let latestHistory: DeviceCommand[] = [];
+                                            for (let attempt = 0; attempt < 12; attempt += 1) {
+                                              if (attempt > 0) {
+                                                await new Promise((resolve) => window.setTimeout(resolve, 1000));
+                                                if (!isCurrentOperation()) return;
+                                              }
+                                              const history = await commandApi.history(requestedTenantId, device.id, 100);
+                                              if (!isCurrentOperation()) return;
+                                              latestHistory = history.commands;
+                                              setCommandHistories((prev) => ({ ...prev, [device.id]: history.commands }));
+                                              setCommandHistoryErrors((prev) => ({ ...prev, [device.id]: "" }));
+                                              observedCommand = history.commands.find(
+                                                (command) => command.id === result.command.id
+                                              );
+                                              if (
+                                                observedCommand &&
+                                                ["succeeded", "failed", "expired"].includes(observedCommand.status)
+                                              ) break;
+                                            }
+                                            if (observedCommand) {
+
+
+                                              const latestRelayCommand = latestHistory.find(
+                                                (command) =>
+                                                  command.command_type === "relay.set" &&
+                                                  command.parameters?.relay === relay,
+                                              );
+                                              setRelayReportedStates((prev) => ({
+                                                ...prev,
+                                                [key]: latestRelayCommand?.status === "succeeded" &&
+                                                  (latestRelayCommand.parameters?.state === "on" ||
+                                                    latestRelayCommand.parameters?.state === "off")
+                                                  ? latestRelayCommand.parameters.state
+                                                  : "unknown",
+                                              }));
+                                              const commandStatus = observedCommand.status;
+                                              const commandState = observedCommand.parameters?.state;
+                                              setRelayErrors((prev) => ({
+                                                ...prev,
+                                                [key]: ["failed", "expired"].includes(commandStatus)
+                                                  ? `คำสั่ง Relay สิ้นสุดด้วยสถานะ ${commandStatus}`
+                                                  : "",
+                                              }));
+                                              const latestMatchesObservedCommand =
+                                                latestRelayCommand?.id === observedCommand.id;
+
+                                              setRelayMessages((prev) => ({
+                                                ...prev,
+                                                [key]: !latestMatchesObservedCommand
+                                                  ? `คำสั่งที่ส่งมีสถานะ ${commandStatus} — สถานะรีเลย์อิงประวัติล่าสุด`
+                                                  : commandStatus === "succeeded" &&
+                                                      (commandState === "on" || commandState === "off")
+                                                    ? `อุปกรณ์รายงานว่าคำสั่ง${commandState === "on" ? "เปิด" : "ปิด"}สำเร็จ — ไม่ใช่การวัดหน้าสัมผัสรีเลย์โดยตรง`
+                                                    : ["failed", "expired"].includes(commandStatus)
+                                                      ? `คำสั่งที่ส่งสิ้นสุดด้วยสถานะ ${commandStatus}`
+                                                      : `คำสั่งที่ส่งยังไม่ยืนยันผล (${commandStatus}) — โปรดตรวจประวัติคำสั่งอีกครั้ง`,
+                                              }));
+                                            } else {
+                                              setRelayMessages((prev) => ({
+                                                ...prev,
+                                                [key]: "ยังไม่พบคำสั่งเดิมในประวัติหลังตรวจสอบ 12 ครั้ง",
+                                              }));
+                                            }
                                           } catch (error) {
+                                            if (!isCurrentOperation()) return;
                                             setCommandHistoryErrors((prev) => ({
                                               ...prev,
                                               [device.id]: error instanceof Error ? error.message : "โหลดประวัติคำสั่งไม่สำเร็จ",
                                             }));
+                                            setRelayReportedStates((prev) => ({
+                                              ...prev,
+                                              [key]: "unknown",
+                                            }));
+                                            const message = error instanceof Error
+                                              ? error.message
+                                              : "โหลดประวัติคำสั่งไม่สำเร็จ";
+                                            setRelayMessages((prev) => ({
+                                              ...prev,
+                                              [key]: `ตรวจสอบผลคำสั่งไม่สำเร็จ: ${message} — ยังไม่ทราบสถานะรีเลย์`,
+                                            }));
                                           }
                                         } catch (error) {
+                                            if (!isCurrentOperation()) return;
                                           setRelayErrors((prev) => ({
                                             ...prev,
                                             [key]: error instanceof Error ? error.message : "ส่งคำสั่งไม่สำเร็จ",
                                           }));
                                         } finally {
-                                          setRelayBusyKey("");
+                                          if (relayOperationRef.current === operationId) setRelayBusyKey("");
                                         }
                                       }}
                                     >
@@ -1309,10 +1777,16 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                                     <button
                                       type="button"
                                       className="relay-button relay-button-off"
-                                      disabled={device.status !== "active" || Boolean(relayBusyKey) || !isTenantUuid(tenantId.trim())}
+                                      disabled={device.status !== "active" || Boolean(relayBusyKey) || !authorizedDeviceTenant}
                                       onClick={async () => {
                                         if (relayBusyKey) return;
+                                        const requestedTenantId = authorizedDeviceTenant?.id ?? "";
+                                        const operationId = ++relayOperationRef.current;
+                                        const isCurrentOperation = () =>
+                                          relayOperationRef.current === operationId &&
+                                          tenantContextRef.current === requestedTenantId;
                                         setRelayBusyKey(key);
+                                        setRelayReportedStates((prev) => ({ ...prev, [key]: "unknown" }));
                                         setRelayErrors((prev) => ({ ...prev, [key]: "" }));
                                         setRelayMessages((prev) => ({ ...prev, [key]: "" }));
                                         try {
@@ -1320,59 +1794,213 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                                             ? crypto.randomUUID()
                                             : `${Date.now()}-${relay}-off`;
                                           const result = await commandApi.createRelayCommand(
-                                            tenantId.trim(), device.id, relay, "off", idempotencyKey
+                                            requestedTenantId, device.id, relay, "off", idempotencyKey
                                           );
+                                          if (!isCurrentOperation()) return;
                                           setRelayMessages((prev) => ({
                                             ...prev,
                                             [key]: `บันทึกคำสั่งปิดแล้ว (${result.command.status})${result.duplicate ? " · คำสั่งเดิม" : ""} — ยังไม่ยืนยันสถานะฮาร์ดแวร์`,
                                           }));
                                           try {
-                                            const history = await commandApi.history(tenantId.trim(), device.id, 10);
-                                            setCommandHistories((prev) => ({ ...prev, [device.id]: history.commands }));
-                                            setCommandHistoryErrors((prev) => ({ ...prev, [device.id]: "" }));
+                                            let observedCommand: DeviceCommand | undefined;
+                                            let latestHistory: DeviceCommand[] = [];
+                                            for (let attempt = 0; attempt < 12; attempt += 1) {
+                                              if (attempt > 0) {
+                                                await new Promise((resolve) => window.setTimeout(resolve, 1000));
+                                                if (!isCurrentOperation()) return;
+                                              }
+                                              const history = await commandApi.history(requestedTenantId, device.id, 100);
+                                              if (!isCurrentOperation()) return;
+                                              latestHistory = history.commands;
+                                              setCommandHistories((prev) => ({ ...prev, [device.id]: history.commands }));
+                                              setCommandHistoryErrors((prev) => ({ ...prev, [device.id]: "" }));
+                                              observedCommand = history.commands.find(
+                                                (command) => command.id === result.command.id
+                                              );
+                                              if (
+                                                observedCommand &&
+                                                ["succeeded", "failed", "expired"].includes(observedCommand.status)
+                                              ) break;
+                                            }
+                                            if (observedCommand) {
+
+                                              const latestRelayCommand = latestHistory.find(
+                                                (command) =>
+                                                  command.command_type === "relay.set" &&
+                                                  command.parameters?.relay === relay,
+                                              );
+                                              setRelayReportedStates((prev) => ({
+                                                ...prev,
+                                                [key]: latestRelayCommand?.status === "succeeded" &&
+                                                  (latestRelayCommand.parameters?.state === "on" ||
+                                                    latestRelayCommand.parameters?.state === "off")
+                                                  ? latestRelayCommand.parameters.state
+                                                  : "unknown",
+                                              }));
+                                              const commandStatus = observedCommand.status;
+                                              const commandState = observedCommand.parameters?.state;
+                                              setRelayErrors((prev) => ({
+                                                ...prev,
+                                                [key]: ["failed", "expired"].includes(commandStatus)
+                                                  ? `คำสั่ง Relay สิ้นสุดด้วยสถานะ ${commandStatus}`
+                                                  : "",
+                                              }));
+                                              const latestMatchesObservedCommand =
+                                                latestRelayCommand?.id === observedCommand.id;
+
+                                              setRelayMessages((prev) => ({
+                                                ...prev,
+                                                [key]: !latestMatchesObservedCommand
+                                                  ? `คำสั่งที่ส่งมีสถานะ ${commandStatus} — สถานะรีเลย์อิงประวัติล่าสุด`
+                                                  : commandStatus === "succeeded" &&
+                                                      (commandState === "on" || commandState === "off")
+                                                    ? `อุปกรณ์รายงานว่าคำสั่ง${commandState === "on" ? "เปิด" : "ปิด"}สำเร็จ — ไม่ใช่การวัดหน้าสัมผัสรีเลย์โดยตรง`
+                                                    : ["failed", "expired"].includes(commandStatus)
+                                                      ? `คำสั่งที่ส่งสิ้นสุดด้วยสถานะ ${commandStatus}`
+                                                      : `คำสั่งที่ส่งยังไม่ยืนยันผล (${commandStatus}) — โปรดตรวจประวัติคำสั่งอีกครั้ง`,
+                                              }));
+                                            } else {
+                                              setRelayMessages((prev) => ({
+                                                ...prev,
+                                                [key]: "ยังไม่พบคำสั่งเดิมในประวัติหลังตรวจสอบ 12 ครั้ง",
+                                              }));
+                                            }
                                           } catch (error) {
+                                            if (!isCurrentOperation()) return;
                                             setCommandHistoryErrors((prev) => ({
                                               ...prev,
                                               [device.id]: error instanceof Error ? error.message : "โหลดประวัติคำสั่งไม่สำเร็จ",
                                             }));
+                                            setRelayReportedStates((prev) => ({
+                                              ...prev,
+                                              [key]: "unknown",
+                                            }));
+                                            const message = error instanceof Error
+                                              ? error.message
+                                              : "โหลดประวัติคำสั่งไม่สำเร็จ";
+                                            setRelayMessages((prev) => ({
+                                              ...prev,
+                                              [key]: `ตรวจสอบผลคำสั่งไม่สำเร็จ: ${message} — ยังไม่ทราบสถานะรีเลย์`,
+                                            }));
                                           }
                                         } catch (error) {
+                                            if (!isCurrentOperation()) return;
                                           setRelayErrors((prev) => ({
                                             ...prev,
                                             [key]: error instanceof Error ? error.message : "ส่งคำสั่งไม่สำเร็จ",
                                           }));
                                         } finally {
-                                          setRelayBusyKey("");
+                                          if (relayOperationRef.current === operationId) setRelayBusyKey("");
                                         }
                                       }}
                                     >
                                       {busy ? "กำลังส่ง…" : "สั่งปิด"}
                                     </button>
                                   </div>
-                                  {relayMessages[key] && <p className="relay-inline-success" role="status">{relayMessages[key]}</p>}
-                                  {relayErrors[key] && <p className="relay-inline-error" role="alert">{relayErrors[key]}</p>}
+                                  {(relayMessages[key] || relayErrors[key]) && (
+                                    <details className="relay-result-details">
+                                      <summary>ดูผลคำสั่ง</summary>
+                                      {relayMessages[key] && (
+                                        <p className="relay-inline-success" role="status">
+                                          {relayMessages[key]}
+                                        </p>
+                                      )}
+                                      {relayErrors[key] && (
+                                        <p className="relay-inline-error" role="alert">
+                                          {relayErrors[key]}
+                                        </p>
+                                      )}
+                                    </details>
+                                  )}
                                 </div>
                               );
                             })}
-                            <div className="relay-history-header">
-                              <h5>ประวัติคำสั่ง</h5>
+                            <details className="relay-history-details">
+                              <summary>ดูประวัติคำสั่ง</summary>
+                              <div className="relay-history-content">
+                                <div className="relay-history-header">
+                                  <h5>ประวัติคำสั่ง</h5>
                               <button
                                 type="button"
                                 className="relay-history-button"
-                                disabled={Boolean(commandHistoryLoading[device.id]) || !isTenantUuid(tenantId.trim())}
+                                disabled={Boolean(commandHistoryLoading[device.id]) || !authorizedDeviceTenant}
                                 onClick={async () => {
+                                  const requestedTenantId = authorizedDeviceTenant?.id ?? "";
+                                  const operationId = ++historySequenceRef.current;
+                                  historyOperationRef.current[device.id] = operationId;
+                                  const isCurrentHistory = () =>
+                                    historyOperationRef.current[device.id] === operationId &&
+                                    tenantContextRef.current === requestedTenantId;
+
                                   setCommandHistoryLoading((prev) => ({ ...prev, [device.id]: true }));
                                   setCommandHistoryErrors((prev) => ({ ...prev, [device.id]: "" }));
                                   try {
-                                    const history = await commandApi.history(tenantId.trim(), device.id, 10);
-                                    setCommandHistories((prev) => ({ ...prev, [device.id]: history.commands }));
+                                    const history = await commandApi.history(requestedTenantId, device.id, 100);
+                                    if (!isCurrentHistory()) return;
+                                    setCommandHistoryErrors((prev) => ({
+                                      ...prev,
+                                      [device.id]: "",
+                                    }));
+                                    setCommandHistories((prev) => ({
+                                      ...prev,
+                                      [device.id]: history.commands.slice(0, 10),
+                                    }));
+
+                                    setRelayReportedStates((prev) => {
+                                      const next = { ...prev };
+
+                                      for (const relay of [1, 2, 3, 4]) {
+                                        const key = `${device.id}:${relay}`;
+                                        const latestCommand = history.commands.find(
+                                          (command) =>
+                                            command.command_type === "relay.set" &&
+                                            command.parameters?.relay === relay,
+                                        );
+
+                                        next[key] =
+                                          latestCommand?.status === "succeeded" &&
+                                          (latestCommand.parameters?.state === "on" ||
+                                            latestCommand.parameters?.state === "off")
+                                            ? latestCommand.parameters.state
+                                            : "unknown";
+                                      }
+
+                                      return next;
+                                    });
+
+                                    setRelayErrors((prev) => {
+                                      const next = { ...prev };
+
+                                      for (const relay of [1, 2, 3, 4]) {
+                                        const key = `${device.id}:${relay}`;
+                                        const latestCommand = history.commands.find(
+                                          (command) =>
+                                            command.command_type === "relay.set" &&
+                                            command.parameters?.relay === relay,
+                                        );
+
+                                        next[key] =
+                                          latestCommand &&
+                                          ["failed", "expired"].includes(latestCommand.status)
+                                            ? `คำสั่ง Relay สิ้นสุดด้วยสถานะ ${latestCommand.status}`
+                                            : "";
+                                      }
+
+                                      return next;
+                                    });
                                   } catch (error) {
+                                    if (!isCurrentHistory()) return;
                                     setCommandHistoryErrors((prev) => ({
                                       ...prev,
                                       [device.id]: error instanceof Error ? error.message : "โหลดประวัติคำสั่งไม่สำเร็จ",
                                     }));
                                   } finally {
-                                    setCommandHistoryLoading((prev) => ({ ...prev, [device.id]: false }));
+                                    if (isCurrentHistory()) {
+                                      setCommandHistoryLoading((prev) => ({
+                                        ...prev,
+                                        [device.id]: false,
+                                      }));
+                                    }
                                   }
                                 }}
                               >
@@ -1397,27 +2025,18 @@ const [commandHistoryErrors, setCommandHistoryErrors] = useState<Record<string, 
                                     ))}
                                   </ul>
                             )}
+                              </div>
+                            </details>
                           </section>
+                          )}
 
-                              <dt>พบล่าสุด</dt>
-                              <dd>
-                                {device.last_seen_at
-                                  ? formatThaiDate(device.last_seen_at)
-                                  : "ยังไม่มีข้อมูล"}
-                              </dd>
-                            </div>
-                            <div>
-                              <dt>Farm ID</dt>
-                              <dd>{device.farm_id ?? "ยังไม่ได้ผูกกับฟาร์ม"}</dd>
-                            </div>
-                          </dl>
                         </article>
                       );
                     })}
                   </div>
                 )}
                 <p className="farm-helper-text device-api-note">
-                  หน้านี้แสดงข้อมูลที่ API ส่งกลับเท่านั้น ยังไม่มีการสั่งงานหรือเปลี่ยนสถานะอุปกรณ์
+                  สถานะ Relay แสดงผลตามรายงานคำสั่งจาก API ไม่ใช่การวัดสถานะฮาร์ดแวร์โดยตรง
                 </p>
               </section>
             </div>

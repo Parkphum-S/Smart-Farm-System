@@ -1,6 +1,7 @@
 """Tenant-authorized command API and device command endpoints."""
 
 import logging
+from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID
 
@@ -71,9 +72,19 @@ def _command_response(row: dict) -> CommandResponse:
         "correlation_id",
         "result_summary",
     }
-    return CommandResponse.model_validate(
-        {key: row[key] for key in allowed if key in row}
-    )
+    payload = {key: row[key] for key in allowed if key in row}
+
+    # Normalize timezone-aware timestamps to UTC before JSON serialization.
+    for field in ("created_at", "expires_at", "updated_at"):
+        value = payload.get(field)
+        if (
+            isinstance(value, datetime)
+            and value.tzinfo is not None
+            and value.utcoffset() is not None
+        ):
+            payload[field] = value.astimezone(timezone.utc)
+
+    return CommandResponse.model_validate(payload)
 
 
 def _database_unavailable(operation: str) -> HTTPException:

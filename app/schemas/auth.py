@@ -33,3 +33,9 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: int
     user: UserResponse
+
+
+class TenantAccessResponse(BaseModel):
+    id: str
+    name: str
+    role: str

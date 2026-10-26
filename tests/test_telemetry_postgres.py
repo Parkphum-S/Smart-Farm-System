@@ -6,9 +6,10 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import DBAPIError
 
-from app.db.session import SessionLocal, engine
+from app.db.session import SessionLocal
 from app.schemas.telemetry import SensorReading, TelemetryEvent
 from app.security.device_auth import DeviceIdentity
 from app.services.telemetry import EventConflict, ingest_telemetry
@@ -31,14 +32,50 @@ def owner_engine():
         db_engine.dispose()
 
 
+
+
+@pytest.fixture(scope="module")
+def app_engine():
+    from dotenv import load_dotenv
+
+    load_dotenv(".env")
+    raw = os.environ.get("SMARTFARM_DATABASE_URL")
+    assert raw, "Runtime database URL is not configured"
+    url = make_url(raw)
+    assert url.database == "smartfarm", "Unexpected runtime DB target"
+
+    test_engine = create_engine(
+        url.set(database="smartfarm_test"),
+        pool_pre_ping=True,
+    )
+    try:
+        with test_engine.connect() as conn:
+            database, role = conn.execute(
+                text("SELECT current_database(), current_user")
+            ).one()
+        assert database == "smartfarm_test", f"Unsafe test database: {database}"
+        assert role == "smartfarm_app", f"Unexpected runtime role: {role}"
+        yield test_engine
+    finally:
+        test_engine.dispose()
+
+
 @pytest.fixture(autouse=True)
-def require_test_database():
-    with engine.connect() as conn:
-        db, role = conn.execute(
+def require_test_database(app_engine, monkeypatch):
+    with app_engine.connect() as conn:
+        database, role = conn.execute(
             text("SELECT current_database(), current_user")
         ).one()
-    assert db == "smartfarm_test", f"Unsafe test database: {db}"
+    assert database == "smartfarm_test", f"Unsafe test database: {database}"
     assert role == "smartfarm_app", f"Unexpected runtime role: {role}"
+
+
+    # Route SessionLocal calls in this test module to the guarded test DB.
+    monkeypatch.setitem(
+        globals(),
+        "SessionLocal",
+        sessionmaker(bind=app_engine, autoflush=False, autocommit=False),
+    )
 
 
 @pytest.fixture
@@ -192,7 +229,7 @@ def test_database_error_rolls_back_event_and_readings(farm_device_sensor):
             {"tenant": identity.tenant_id},
         ).scalar_one() == 0
 
-def test_archive_reader_streams_events_and_readings_read_only(farm_device_sensor):
+def test_archive_reader_streams_events_and_readings_read_only(farm_device_sensor, app_engine):
     _, identity, make_event = farm_device_sensor
     event = make_event(values=[25.5, 26.0])
 
@@ -202,7 +239,7 @@ def test_archive_reader_streams_events_and_readings_read_only(farm_device_sensor
     start_at = datetime.now(timezone.utc) - timedelta(minutes=5)
     end_at = datetime.now(timezone.utc) + timedelta(minutes=5)
 
-    with engine.connect().execution_options(
+    with app_engine.connect().execution_options(
         isolation_level="REPEATABLE READ"
     ) as conn:
         with conn.begin():
@@ -226,7 +263,7 @@ def test_archive_reader_streams_events_and_readings_read_only(farm_device_sensor
     assert {float(row["value"]) for row in readings} == {25.5, 26.0}
 
 
-def test_archive_reader_uses_half_open_event_interval(farm_device_sensor):
+def test_archive_reader_uses_half_open_event_interval(farm_device_sensor, app_engine):
     owner, identity, make_event = farm_device_sensor
 
     events = [
@@ -267,7 +304,7 @@ def test_archive_reader_uses_half_open_event_interval(farm_device_sensor):
         ingested[1].event_record_id,
     }
 
-    with engine.connect().execution_options(
+    with app_engine.connect().execution_options(
         isolation_level="REPEATABLE READ"
     ) as conn:
         with conn.begin():
@@ -295,7 +332,7 @@ def test_archive_reader_uses_half_open_event_interval(farm_device_sensor):
 
 
 def test_archive_bundle_exports_events_and_readings_postgres(
-    farm_device_sensor, tmp_path
+    farm_device_sensor, tmp_path, app_engine
 ):
     import json
 
@@ -308,7 +345,7 @@ def test_archive_bundle_exports_events_and_readings_postgres(
     start_at = datetime.now(timezone.utc) - timedelta(minutes=5)
     end_at = datetime.now(timezone.utc) + timedelta(minutes=5)
 
-    with engine.connect() as conn:
+    with app_engine.connect() as conn:
         assert conn.exec_driver_sql(
             "SELECT current_database()"
         ).scalar_one() == "smartfarm_test"
