@@ -340,9 +340,17 @@ def test_postgres_runtime_zone_privileges(app_engine):
                     ),
                     has_column_privilege(
                         current_user, 'zones', 'farm_id', 'UPDATE'
+                    ),
+                    has_column_privilege(
+                        current_user, 'zones', 'id', 'UPDATE'
+                    ),
+                    has_column_privilege(
+                        current_user, 'zones', 'updated_at', 'UPDATE'
                     )
             """)
         ).one()
 
     assert tuple(table_privileges) == (True, True, True)
-    assert tuple(update_privileges) == (True, True, True, False, False)
+    assert tuple(update_privileges) == (
+        True, True, True, False, False, False, True
+    )

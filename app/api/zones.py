@@ -1,5 +1,6 @@
 """Tenant-scoped zone endpoints."""
 
+import json
 from typing import Annotated
 from uuid import UUID, uuid4
 
@@ -43,7 +44,7 @@ def list_zones(
 ) -> list[ZoneResponse]:
     query = (
         "SELECT id, tenant_id, farm_id, name, description, "
-        "status, created_at, updated_at FROM zones "
+        "status, zone_type, category_details, created_at, updated_at FROM zones "
         "WHERE tenant_id = :tenant_id AND farm_id = :farm_id"
     )
     params = {
@@ -92,11 +93,13 @@ def create_zone(
             row = db.execute(
                 text(
                     "INSERT INTO zones "
-                    "(id, tenant_id, farm_id, name, description, status) "
+                    "(id, tenant_id, farm_id, name, description, status, "
+                    "zone_type, category_details) "
                     "VALUES (:id, :tenant_id, :farm_id, :name, "
-                    ":description, :status) "
+                    ":description, :status, :zone_type, "
+                    "CAST(:category_details AS jsonb)) "
                     "RETURNING id, tenant_id, farm_id, name, description, "
-                    "status, created_at, updated_at"
+                    "status, zone_type, category_details, created_at, updated_at"
                 ),
                 {
                     "id": uuid4(),
@@ -105,6 +108,10 @@ def create_zone(
                     "name": payload.name,
                     "description": payload.description,
                     "status": payload.status,
+                    "zone_type": payload.zone_type,
+                    "category_details": json.dumps(
+                        payload.category_details, ensure_ascii=False
+                    ),
                 },
             ).mappings().one()
     except IntegrityError as exc:
@@ -136,7 +143,7 @@ def get_zone(
             row = db.execute(
                 text(
                     "SELECT id, tenant_id, farm_id, name, description, "
-                    "status, created_at, updated_at FROM zones "
+                    "status, zone_type, category_details, created_at, updated_at FROM zones "
                     "WHERE tenant_id = :tenant_id AND farm_id = :farm_id "
                     "AND id = :zone_id"
                 ),
@@ -173,7 +180,21 @@ def update_zone(
     ):
         raise HTTPException(status_code=422, detail="Invalid update value")
 
-    assignments = ", ".join(f"{key} = :{key}" for key in changes)
+    if "category_details" in changes:
+        if changes["category_details"] is None:
+            raise HTTPException(status_code=422, detail="Invalid update value")
+        changes["category_details"] = json.dumps(
+            changes["category_details"], ensure_ascii=False
+        )
+
+    assignments = ", ".join(
+        (
+            f"{key} = CAST(:{key} AS jsonb)"
+            if key == "category_details"
+            else f"{key} = :{key}"
+        )
+        for key in changes
+    )
     try:
         with db.begin():
             row = db.execute(
@@ -182,7 +203,7 @@ def update_zone(
                     "WHERE tenant_id = :tenant_id AND farm_id = :farm_id "
                     "AND id = :zone_id "
                     "RETURNING id, tenant_id, farm_id, name, description, "
-                    "status, created_at, updated_at"
+                    "status, zone_type, category_details, created_at, updated_at"
                 ),
                 {
                     **changes,

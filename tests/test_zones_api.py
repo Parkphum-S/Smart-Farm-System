@@ -33,6 +33,8 @@ ZONE_ROW = {
     "name": "Greenhouse A",
     "description": "North greenhouse",
     "status": "active",
+    "zone_type": "plant",
+    "category_details": {},
     "created_at": CREATED_AT,
     "updated_at": CREATED_AT,
 }

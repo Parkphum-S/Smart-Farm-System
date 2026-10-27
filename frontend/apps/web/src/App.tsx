@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ApiError, authApi, commandApi, deviceApi, farmApi, zoneApi } from "./services/api";
-import type { TenantAccess } from "./services/api";
+import type { Farm, TenantAccess } from "./services/api";
 import type { DeviceCommand } from "./services/api";
 import type { Device } from "./services/api";
-import type { Zone } from "./services/api";
+import type { Zone, ZoneType, ZoneCategoryDetails } from "./services/api";
+import { zoneTypeLabels } from "./services/api";
 
 async function copyTextToClipboard(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
@@ -161,6 +162,9 @@ export default function App() {
   const [zoneName, setZoneName] = useState("");
   const [zoneDescription, setZoneDescription] = useState("");
   const [zoneStatus, setZoneStatus] = useState<"active" | "disabled">("active");
+  const [zoneType, setZoneType] = useState<ZoneType>("plant");
+  const [zoneCategoryDetails, setZoneCategoryDetails] = useState<ZoneCategoryDetails>({});
+  const [zoneRelayMappingText, setZoneRelayMappingText] = useState("{}");
   const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
   const [zoneSaving, setZoneSaving] = useState(false);
   const [zoneFormError, setZoneFormError] = useState("");
@@ -201,6 +205,12 @@ export default function App() {
   const [farmsError, setFarmsError] = useState("");
   const [farmsRequested, setFarmsRequested] = useState(false);
   const [farmsReloadKey, setFarmsReloadKey] = useState(0);
+  const [farmFormMode, setFarmFormMode] = useState<"create" | "edit" | null>(null);
+  const [farmName, setFarmName] = useState("");
+  const [farmTimezone, setFarmTimezone] = useState("Asia/Bangkok");
+  const [farmSaving, setFarmSaving] = useState(false);
+  const [farmActionError, setFarmActionError] = useState("");
+  const [farmActionMessage, setFarmActionMessage] = useState("");
   const [devices, setDevices] = useState<Device[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [devicesError, setDevicesError] = useState("");
@@ -236,6 +246,12 @@ useLayoutEffect(() => {
     created_at: string; updated_at: string;
     displayId: string;
   } | null>(null);
+
+  const canManageFarms = ["owner", "operator"].includes(
+    authorizedTenants.find(
+      (item) => item.id.toLowerCase() === tenantId.trim().toLowerCase(),
+    )?.role ?? "",
+  );
 
 
   const zoneTabs = [
@@ -1011,6 +1027,11 @@ useLayoutEffect(() => {
                       setTenantId(event.target.value);
                       setSelectedFarm(null);
                       setCopiedField("");
+                      setFarmFormMode(null);
+                      setFarmName("");
+                      setFarmTimezone("Asia/Bangkok");
+                      setFarmActionError("");
+                      setFarmActionMessage("");
                     }}
                     disabled={
                       tenantListLoading ||
@@ -1048,6 +1069,79 @@ useLayoutEffect(() => {
                     ระบบใช้ Access Token ผ่าน API service เดิม
                   </p>
                 </div>
+
+                {farmActionMessage && (
+                  <div className="farm-message" role="status">
+                    {farmActionMessage}
+                  </div>
+                )}
+
+                {canManageFarms && (
+                  <form
+                    className="farm-crud-form"
+                    onSubmit={async (event) => {
+                      event.preventDefault();
+                      if (farmSaving || !tenantId) return;
+                      const name = farmName.trim();
+                      const timezone = farmTimezone.trim();
+                      if (!name || !timezone) {
+                        setFarmActionError("กรุณากรอกชื่อฟาร์มและเขตเวลา");
+                        return;
+                      }
+                      setFarmSaving(true);
+                      setFarmActionError("");
+                      setFarmActionMessage("");
+                      try {
+                        const created = await farmApi.create(tenantId, { name, timezone });
+                        const displayId = `FARM-${String(farms.length + 1).padStart(2, "0")}`;
+                        setSelectedFarm({ ...created, displayId });
+                        setFarmName("");
+                        setFarmTimezone("Asia/Bangkok");
+                        setFarmFormMode(null);
+                        setFarmActionMessage("สร้างฟาร์มสำเร็จ");
+                        setFarmsReloadKey((key) => key + 1);
+                        navigate("farm-detail");
+                      } catch (error) {
+                        setFarmActionError(error instanceof Error ? error.message : "สร้างฟาร์มไม่สำเร็จ");
+                      } finally {
+                        setFarmSaving(false);
+                      }
+                    }}
+                  >
+                    <h3>เพิ่มฟาร์ม</h3>
+                    <label htmlFor="farm-create-name">ชื่อฟาร์ม</label>
+                    <input
+                      id="farm-create-name"
+                      value={farmName}
+                      onChange={(event) => setFarmName(event.target.value)}
+                      maxLength={160}
+                      required
+                      disabled={farmSaving}
+                      placeholder="เช่น ฟาร์มผักโรงเรือน"
+                    />
+                    <label htmlFor="farm-create-timezone">เขตเวลา</label>
+                    <select
+                      id="farm-create-timezone"
+                      value={farmTimezone}
+                      onChange={(event) => setFarmTimezone(event.target.value)}
+                      disabled={farmSaving}
+                    >
+                      <option value="Asia/Bangkok">Asia/Bangkok (ประเทศไทย)</option>
+                      <option value="UTC">UTC</option>
+                      <option value="Asia/Singapore">Asia/Singapore</option>
+                      <option value="Asia/Tokyo">Asia/Tokyo</option>
+                      <option value="Australia/Sydney">Australia/Sydney</option>
+                      <option value="Europe/London">Europe/London</option>
+                      <option value="America/New_York">America/New_York</option>
+                    </select>
+                    {farmActionError && <p className="farm-message-error" role="alert">{farmActionError}</p>}
+                    <div className="farm-crud-actions">
+                      <button className="primary-button" type="submit" disabled={farmSaving}>
+                        {farmSaving ? "กำลังบันทึก…" : "สร้างฟาร์ม"}
+                      </button>
+                    </div>
+                  </form>
+                )}
 
                 {farmsError && (
                   <div className="farm-message farm-message-error" role="alert">
@@ -1113,6 +1207,85 @@ useLayoutEffect(() => {
                     </div>
                     <span className="source-label">Farm Detail</span>
                   </div>
+
+                  {canManageFarms && farmFormMode === "edit" && (
+                    <form
+                      className="farm-crud-form"
+                      onSubmit={async (event) => {
+                        event.preventDefault();
+                        if (farmSaving || !selectedFarm || !tenantId) return;
+                        const name = farmName.trim();
+                        const timezone = farmTimezone.trim();
+                        if (!name || !timezone) {
+                          setFarmActionError("กรุณากรอกชื่อฟาร์มและเขตเวลา");
+                          return;
+                        }
+                        setFarmSaving(true);
+                        setFarmActionError("");
+                        setFarmActionMessage("");
+                        try {
+                          const updated = await farmApi.update(
+                            tenantId,
+                            selectedFarm.id,
+                            { name, timezone },
+                          );
+                          setSelectedFarm({ ...updated, displayId: selectedFarm.displayId });
+                          setFarmFormMode(null);
+                          setFarmActionMessage("บันทึกการแก้ไขฟาร์มแล้ว");
+                          setFarmsReloadKey((key) => key + 1);
+                        } catch (error) {
+                          setFarmActionError(error instanceof Error ? error.message : "แก้ไขฟาร์มไม่สำเร็จ");
+                        } finally {
+                          setFarmSaving(false);
+                        }
+                      }}
+                    >
+                      <h3>แก้ไขข้อมูลฟาร์ม</h3>
+                      <label htmlFor="farm-edit-name">ชื่อฟาร์ม</label>
+                      <input
+                        id="farm-edit-name"
+                        value={farmName}
+                        onChange={(event) => setFarmName(event.target.value)}
+                        maxLength={160}
+                        required
+                        disabled={farmSaving}
+                      />
+                      <label htmlFor="farm-edit-timezone">เขตเวลา</label>
+                      <select
+                        id="farm-edit-timezone"
+                        value={farmTimezone}
+                        onChange={(event) => setFarmTimezone(event.target.value)}
+                        disabled={farmSaving}
+                      >
+                        <option value="Asia/Bangkok">Asia/Bangkok (ประเทศไทย)</option>
+                        <option value="UTC">UTC</option>
+                        <option value="Asia/Singapore">Asia/Singapore</option>
+                        <option value="Asia/Tokyo">Asia/Tokyo</option>
+                        <option value="Australia/Sydney">Australia/Sydney</option>
+                        <option value="Europe/London">Europe/London</option>
+                        <option value="America/New_York">America/New_York</option>
+                      </select>
+                      {farmActionError && <p className="farm-message-error" role="alert">{farmActionError}</p>}
+                      <div className="farm-crud-actions">
+                        <button className="primary-button" type="submit" disabled={farmSaving}>
+                          {farmSaving ? "กำลังบันทึก…" : "บันทึกการแก้ไข"}
+                        </button>
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={farmSaving}
+                          onClick={() => {
+                            setFarmFormMode(null);
+                            setFarmActionError("");
+                          }}
+                        >
+                          ยกเลิก
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                  {farmActionMessage && <div className="farm-message" role="status">{farmActionMessage}</div>}
+                  {farmActionError && farmFormMode !== "edit" && <div className="farm-message farm-message-error" role="alert">{farmActionError}</div>}
 
                   <div className="farm-detail-grid">
                     <div className="farm-detail-item">
@@ -1187,10 +1360,60 @@ useLayoutEffect(() => {
                     <button
                       className="secondary-button"
                       type="button"
-                      onClick={() => navigate("farms")}
+                      onClick={() => {
+                        setFarmFormMode(null);
+                        setFarmActionError("");
+                        setFarmActionMessage("");
+                        setFarmName("");
+                        setFarmTimezone("Asia/Bangkok");
+                        navigate("farms");
+                      }}
                     >
                       ← กลับรายการฟาร์ม
                     </button>
+                    {canManageFarms && (
+                      <>
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          disabled={farmSaving}
+                          onClick={() => {
+                            setFarmName(selectedFarm.name);
+                            setFarmTimezone(selectedFarm.timezone);
+                            setFarmActionError("");
+                            setFarmActionMessage("");
+                            setFarmFormMode("edit");
+                          }}
+                        >
+                          แก้ไขฟาร์ม
+                        </button>
+                        <button
+                          className="secondary-button farm-delete-button"
+                          type="button"
+                          disabled={farmSaving}
+                          onClick={async () => {
+                            if (!window.confirm(`ยืนยันลบฟาร์ม "${selectedFarm.name}" หรือไม่? การลบจะไม่ทำงานหากยังมีโซนหรืออุปกรณ์อ้างอิงอยู่`)) return;
+                            setFarmSaving(true);
+                            setFarmActionError("");
+                            setFarmActionMessage("");
+                            try {
+                              await farmApi.delete(tenantId, selectedFarm.id);
+                              setSelectedFarm(null);
+                              setFarmFormMode(null);
+                              setFarmsReloadKey((key) => key + 1);
+                              setFarmActionMessage("ลบฟาร์มสำเร็จ");
+                              navigate("farms");
+                            } catch (error) {
+                              setFarmActionError(error instanceof Error ? error.message : "ลบฟาร์มไม่สำเร็จ");
+                            } finally {
+                              setFarmSaving(false);
+                            }
+                          }}
+                        >
+                          {farmSaving ? "กำลังดำเนินการ…" : "ลบฟาร์ม"}
+                        </button>
+                      </>
+                    )}
                     <button
                       className="primary-button"
                       type="button"
@@ -1290,10 +1513,41 @@ useLayoutEffect(() => {
                             setZoneFormError("");
                             setZoneActionMessage("");
                             try {
+                              let categoryDetails: ZoneCategoryDetails = {
+                                ...zoneCategoryDetails,
+                              };
+                              if (zoneType === "lighting") {
+                                const rawCount = categoryDetails.switch_count;
+                                if (rawCount === "" || rawCount === undefined) {
+                                  delete categoryDetails.switch_count;
+                                } else {
+                                  const count = Number(rawCount);
+                                  if (!Number.isInteger(count) || count < 1) {
+                                    throw new Error("จำนวนสวิตช์ต้องเป็นจำนวนเต็มตั้งแต่ 1 ขึ้นไป");
+                                  }
+                                  categoryDetails.switch_count = count;
+                                }
+                                let relayMapping: unknown;
+                                try {
+                                  relayMapping = JSON.parse(zoneRelayMappingText);
+                                } catch {
+                                  throw new Error("Relay mapping ต้องเป็น JSON ที่ถูกต้อง");
+                                }
+                                if (
+                                  relayMapping === null ||
+                                  typeof relayMapping !== "object" ||
+                                  Array.isArray(relayMapping)
+                                ) {
+                                  throw new Error("Relay mapping ต้องเป็น JSON object ที่ถูกต้อง");
+                                }
+                                categoryDetails.relay_mapping = relayMapping;
+                              }
                               const payload = {
                                 name,
                                 description: zoneDescription.trim() || null,
                                 status: zoneStatus,
+                                zone_type: zoneType,
+                                category_details: categoryDetails,
                               };
                               if (editingZoneId) {
                                 await zoneApi.update(tenantId, selectedFarm.id, editingZoneId, payload);
@@ -1305,6 +1559,9 @@ useLayoutEffect(() => {
                               setZoneName("");
                               setZoneDescription("");
                               setZoneStatus("active");
+                              setZoneType("plant");
+                              setZoneCategoryDetails({});
+                              setZoneRelayMappingText("{}");
                               setEditingZoneId(null);
                               setZonesReloadKey((key) => key + 1);
                             } catch (error) {
@@ -1348,6 +1605,95 @@ useLayoutEffect(() => {
                               <option value="disabled">ปิดใช้งาน</option>
                             </select>
                           </label>
+                          <label>
+                            ประเภทโซน
+                            <select
+                              value={zoneType}
+                              disabled={zoneSaving}
+                              onChange={(event) => {
+                                setZoneType(event.target.value as ZoneType);
+                                setZoneCategoryDetails({});
+                                setZoneRelayMappingText("{}");
+                              }}
+                            >
+                              <option value="plant">พืช</option>
+                              <option value="livestock">ปศุสัตว์</option>
+                              <option value="fish_pond">บ่อปลา</option>
+                              <option value="mushroom">เห็ด</option>
+                              <option value="cctv">กล้องวงจรปิด</option>
+                              <option value="lighting">แสงสว่าง</option>
+                            </select>
+                          </label>
+
+                          {zoneType === "plant" && (
+                            <>
+                              <label>ชื่อพืช
+                                <input value={String(zoneCategoryDetails.crop_name ?? "")} maxLength={120} disabled={zoneSaving}
+                                  onChange={(event) => setZoneCategoryDetails((current) => ({ ...current, crop_name: event.target.value }))} />
+                              </label>
+                              <label>ประเภทพืช
+                                <input value={String(zoneCategoryDetails.crop_type ?? "")} maxLength={120} disabled={zoneSaving}
+                                  onChange={(event) => setZoneCategoryDetails((current) => ({ ...current, crop_type: event.target.value }))} />
+                              </label>
+                            </>
+                          )}
+                          {zoneType === "livestock" && (
+                            <label>ชนิดสัตว์
+                              <input value={String(zoneCategoryDetails.species ?? "")} maxLength={120} disabled={zoneSaving}
+                                onChange={(event) => setZoneCategoryDetails((current) => ({ ...current, species: event.target.value }))} />
+                            </label>
+                          )}
+                          {zoneType === "fish_pond" && (
+                            <label>ชนิดปลา
+                              <input value={String(zoneCategoryDetails.fish_species ?? "")} maxLength={120} disabled={zoneSaving}
+                                onChange={(event) => setZoneCategoryDetails((current) => ({ ...current, fish_species: event.target.value }))} />
+                            </label>
+                          )}
+                          {zoneType === "mushroom" && (
+                            <>
+                              <label>ชนิดเห็ด
+                                <input value={String(zoneCategoryDetails.mushroom_type ?? "")} maxLength={120} disabled={zoneSaving}
+                                  onChange={(event) => setZoneCategoryDetails((current) => ({ ...current, mushroom_type: event.target.value }))} />
+                              </label>
+                              <label>สายพันธุ์
+                                <input value={String(zoneCategoryDetails.variety ?? "")} maxLength={120} disabled={zoneSaving}
+                                  onChange={(event) => setZoneCategoryDetails((current) => ({ ...current, variety: event.target.value }))} />
+                              </label>
+                            </>
+                          )}
+                          {zoneType === "cctv" && (
+                            <>
+                              <label>ชื่อกล้อง
+                                <input value={String(zoneCategoryDetails.camera_name ?? "")} maxLength={120} disabled={zoneSaving}
+                                  onChange={(event) => setZoneCategoryDetails((current) => ({ ...current, camera_name: event.target.value }))} />
+                              </label>
+                              <label>รหัสกล้อง
+                                <input value={String(zoneCategoryDetails.camera_id ?? "")} maxLength={120} disabled={zoneSaving}
+                                  onChange={(event) => setZoneCategoryDetails((current) => ({ ...current, camera_id: event.target.value }))} />
+                              </label>
+                              <label>URL สตรีมกล้อง
+                                <input type="url" value={String(zoneCategoryDetails.stream_url ?? "")} maxLength={500} disabled={zoneSaving}
+                                  placeholder="rtsp://camera.local/live"
+                                  onChange={(event) => setZoneCategoryDetails((current) => ({ ...current, stream_url: event.target.value }))} />
+                                <small>ห้ามใส่ username/password, query parameters หรือ fragment ใน URL</small>
+                              </label>
+                            </>
+                          )}
+                          {zoneType === "lighting" && (
+                            <>
+                              <label>จำนวนสวิตช์
+                                <input type="number" min={1} step={1}
+                                  value={String(zoneCategoryDetails.switch_count ?? "")} disabled={zoneSaving}
+                                  onChange={(event) => setZoneCategoryDetails((current) => ({ ...current, switch_count: event.target.value }))} />
+                              </label>
+                              <label>จับคู่สวิตช์กับช่องรีเลย์ (JSON)
+                                <textarea rows={3} value={zoneRelayMappingText} disabled={zoneSaving}
+                                  onChange={(event) => setZoneRelayMappingText(event.target.value)}
+                                  placeholder={'{"Switch 1": 1, "Switch 2": 2}'} />
+                                <small>ระบุเลขช่องรีเลย์เป็นจำนวนเต็มบวก การตรวจว่าช่องมีอยู่จริงต้องอาศัยข้อมูลอุปกรณ์</small>
+                              </label>
+                            </>
+                          )}
                           {zoneFormError && <p className="farm-message-error" role="alert">{zoneFormError}</p>}
                           <div className="zone-form-actions">
                             <button className="primary-button" type="submit" disabled={zoneSaving}>
@@ -1363,6 +1709,9 @@ useLayoutEffect(() => {
                                   setZoneName("");
                                   setZoneDescription("");
                                   setZoneStatus("active");
+                                  setZoneType("plant");
+                                  setZoneCategoryDetails({});
+                                  setZoneRelayMappingText("{}");
                                   setZoneFormError("");
                                 }}
                               >ยกเลิก</button>
@@ -1412,6 +1761,8 @@ useLayoutEffect(() => {
                                   </span>
                                 </div>
                                 <p>{zone.description || "ไม่มีคำอธิบาย"}</p>
+                                <small>ประเภทโซน: {zoneTypeLabels[zone.zone_type ?? "plant"]}</small>
+                                <br />
                                 <small>แก้ไขล่าสุด {formatThaiDate(zone.updated_at)}</small>
                               </div>
                               {canManage && (
@@ -1425,6 +1776,11 @@ useLayoutEffect(() => {
                                       setZoneName(zone.name);
                                       setZoneDescription(zone.description ?? "");
                                       setZoneStatus(zone.status);
+                                      setZoneType(zone.zone_type ?? "plant");
+                                      setZoneCategoryDetails(zone.category_details ?? {});
+                                      setZoneRelayMappingText(
+                                        JSON.stringify(zone.category_details?.relay_mapping ?? {}, null, 2),
+                                      );
                                       setZoneFormError("");
                                       setZoneActionMessage("");
                                     }}
@@ -1448,6 +1804,10 @@ useLayoutEffect(() => {
                                           setEditingZoneId(null);
                                           setZoneName("");
                                           setZoneDescription("");
+                                          setZoneStatus("active");
+                                          setZoneType("plant");
+                                          setZoneCategoryDetails({});
+                                          setZoneRelayMappingText("{}");
                                         }
                                         setZoneActionMessage("ลบโซนแล้ว");
                                         setZonesReloadKey((key) => key + 1);

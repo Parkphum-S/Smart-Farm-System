@@ -82,7 +82,7 @@ def postgres_engines():
             revision = conn.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert revision == "0004_zones", (
+            assert revision == "0007_zone_types_details", (
                 f"Unexpected test migration: {revision!r}"
             )
 

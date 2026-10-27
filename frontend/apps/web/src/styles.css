@@ -833,6 +833,36 @@ h1 { margin: 0; color: var(--sf-text); font-size: clamp(23px, 2vw, 29px); font-w
 .farm-list-empty { text-align: center; }
 .farm-list-empty h3 { margin: 12px 0 6px; color: var(--text-primary, #26352b); }
 .farm-list { display: grid; gap: 12px; }
+.farm-crud-form {
+  display: grid;
+  gap: 10px;
+  margin: 20px 0;
+  padding: 18px;
+  border: 1px solid var(--border-color, #e1e8e1);
+  border-radius: 12px;
+  background: var(--surface, #fff);
+}
+.farm-crud-form h3 { margin: 0 0 4px; }
+.farm-crud-form label { font-size: 13px; font-weight: 650; }
+.farm-crud-form input, .farm-crud-form select {
+  width: 100%;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border-color, #dfe7df);
+  border-radius: 9px;
+  background: var(--surface, #fff);
+  color: inherit;
+  font: inherit;
+}
+.farm-crud-form input:focus, .farm-crud-form select:focus {
+  outline: 2px solid #8eb99a;
+  outline-offset: 1px;
+}
+.farm-crud-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.farm-crud-actions button { margin-top: 4px; }
+.farm-delete-button { border-color: #e8b8b1; color: #8c342b; }
+.farm-delete-button:hover { background: #fff8f7; }
+
 .farm-card {
   display: flex; align-items: center; gap: 14px; min-width: 0;
   padding: 18px; border: 1px solid var(--border-color, #e1e8e1);

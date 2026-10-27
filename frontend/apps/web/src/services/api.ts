@@ -117,15 +117,62 @@ export interface Farm {
   updated_at: string;
 }
 
+export interface FarmCreate {
+  name: string;
+  timezone: string;
+}
+
+export type FarmUpdate = Partial<FarmCreate>;
+
 export const farmApi = {
   list(tenantId: string): Promise<Farm[]> {
     return request<Farm[]>(
       `/api/v1/tenants/${encodeURIComponent(tenantId)}/farms`,
     );
   },
+
+  create(tenantId: string, data: FarmCreate): Promise<Farm> {
+    return request<Farm>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/farms`,
+      { method: "POST", body: JSON.stringify(data) },
+    );
+  },
+
+  update(tenantId: string, farmId: string, data: FarmUpdate): Promise<Farm> {
+    return request<Farm>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/farms/${encodeURIComponent(farmId)}`,
+      { method: "PATCH", body: JSON.stringify(data) },
+    );
+  },
+
+  delete(tenantId: string, farmId: string): Promise<void> {
+    return request<void>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/farms/${encodeURIComponent(farmId)}`,
+      { method: "DELETE" },
+    );
+  },
 };
 
 
+
+export type ZoneType =
+  | "plant"
+  | "livestock"
+  | "fish_pond"
+  | "mushroom"
+  | "cctv"
+  | "lighting";
+
+export type ZoneCategoryDetails = Record<string, unknown>;
+
+export const zoneTypeLabels: Record<ZoneType, string> = {
+  plant: "พืช",
+  livestock: "ปศุสัตว์",
+  fish_pond: "บ่อปลา",
+  mushroom: "เห็ด",
+  cctv: "กล้องวงจรปิด",
+  lighting: "แสงสว่าง",
+};
 
 export interface Zone {
   id: string;
@@ -134,6 +181,8 @@ export interface Zone {
   name: string;
   description: string | null;
   status: "active" | "disabled";
+  zone_type: ZoneType;
+  category_details: ZoneCategoryDetails;
   created_at: string;
   updated_at: string;
 }
@@ -142,6 +191,8 @@ export interface ZoneCreate {
   name: string;
   description?: string | null;
   status?: "active" | "disabled";
+  zone_type: ZoneType;
+  category_details: ZoneCategoryDetails;
 }
 
 export type ZoneUpdate = Partial<ZoneCreate>;

@@ -55,8 +55,17 @@ def farm_client(monkeypatch):
     )
     app.dependency_overrides[get_db] = override_get_db
 
-    async def request(token="test-token"):
+    async def request(
+        token="test-token",
+        method="GET",
+        tenant_id=TENANT_ID,
+        farm_id=None,
+        json=None,
+    ):
         transport = httpx.ASGITransport(app=app)
+        path = f"/api/v1/tenants/{tenant_id}/farms"
+        if farm_id is not None:
+            path += f"/{farm_id}"
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://testserver",
@@ -66,9 +75,8 @@ def farm_client(monkeypatch):
                 if token is not None
                 else {}
             )
-            return await client.get(
-                f"/api/v1/tenants/{TENANT_ID}/farms",
-                headers=headers,
+            return await client.request(
+                method, path, headers=headers, json=json
             )
 
     yield db, request
@@ -150,6 +158,200 @@ def test_database_error_returns_safe_503(farm_client):
     )
 
     response = asyncio.run(request())
+
+    assert response.status_code == 503
+    assert "private database detail" not in response.text
+
+
+def test_create_farm_returns_created_resource(farm_client):
+    db, request = farm_client
+    db.execute.return_value.mappings.return_value.one.return_value = FARM_ROW
+
+    response = asyncio.run(
+        request(
+            method="POST",
+            json={"name": "North Farm", "timezone": "Asia/Bangkok"},
+        )
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["id"] == str(FARM_ID)
+    assert response.json()["name"] == "North Farm"
+
+    sql = str(db.execute.call_args.args[0])
+    params = db.execute.call_args.args[1]
+    assert "INSERT INTO farms" in sql
+    assert params["tenant_id"] == TENANT_ID
+    assert params["name"] == "North Farm"
+    assert params["timezone"] == "Asia/Bangkok"
+
+
+def test_create_farm_trims_name_and_defaults_timezone(farm_client):
+    db, request = farm_client
+    db.execute.return_value.mappings.return_value.one.return_value = {
+        **FARM_ROW,
+        "name": "New Farm",
+        "timezone": "UTC",
+    }
+
+    response = asyncio.run(
+        request(method="POST", json={"name": "  New Farm  "})
+    )
+
+    assert response.status_code == 201, response.text
+    params = db.execute.call_args.args[1]
+    assert params["name"] == "New Farm"
+    assert params["timezone"] == "UTC"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"name": "   "},
+        {"name": "Farm", "timezone": "Not/A_Real_Timezone"},
+        {"name": "Farm", "unexpected": "field"},
+    ],
+)
+def test_create_farm_rejects_invalid_payload(farm_client, payload):
+    db, request = farm_client
+
+    response = asyncio.run(request(method="POST", json=payload))
+
+    assert response.status_code == 422
+    db.execute.assert_not_called()
+
+
+def test_update_farm_returns_updated_resource(farm_client):
+    db, request = farm_client
+    updated = {**FARM_ROW, "name": "Updated Farm"}
+    db.execute.return_value.mappings.return_value.first.return_value = updated
+
+    response = asyncio.run(
+        request(
+            method="PATCH",
+            farm_id=FARM_ID,
+            json={"name": "Updated Farm"},
+        )
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["name"] == "Updated Farm"
+
+    sql = str(db.execute.call_args.args[0])
+    params = db.execute.call_args.args[1]
+    assert "UPDATE farms" in sql
+    assert "WHERE tenant_id = :tenant_id AND id = :farm_id" in sql
+    assert params["tenant_id"] == TENANT_ID
+    assert params["farm_id"] == FARM_ID
+    assert params["name"] == "Updated Farm"
+
+
+@pytest.mark.parametrize("payload", [{}, {"name": None}, {"timezone": None}])
+def test_update_farm_rejects_empty_or_null_fields(farm_client, payload):
+    db, request = farm_client
+
+    response = asyncio.run(
+        request(method="PATCH", farm_id=FARM_ID, json=payload)
+    )
+
+    assert response.status_code == 422
+    db.execute.assert_not_called()
+
+
+def test_update_farm_missing_resource_returns_404(farm_client):
+    db, request = farm_client
+    db.execute.return_value.mappings.return_value.first.return_value = None
+
+    response = asyncio.run(
+        request(method="PATCH", farm_id=FARM_ID, json={"name": "Missing"})
+    )
+
+    assert response.status_code == 404
+
+
+def test_update_farm_rejects_unknown_fields(farm_client):
+    db, request = farm_client
+
+    response = asyncio.run(
+        request(
+            method="PATCH",
+            farm_id=FARM_ID,
+            json={"tenant_id": str(TENANT_ID)},
+        )
+    )
+
+    assert response.status_code == 422
+    db.execute.assert_not_called()
+
+
+def test_delete_farm_returns_204_and_scopes_query(farm_client):
+    db, request = farm_client
+    db.execute.return_value.rowcount = 1
+
+    response = asyncio.run(request(method="DELETE", farm_id=FARM_ID))
+
+    assert response.status_code == 204
+    sql = str(db.execute.call_args.args[0])
+    params = db.execute.call_args.args[1]
+    assert "DELETE FROM farms" in sql
+    assert "WHERE tenant_id = :tenant_id AND id = :farm_id" in sql
+    assert params == {"tenant_id": TENANT_ID, "farm_id": FARM_ID}
+
+
+def test_delete_farm_missing_resource_returns_404(farm_client):
+    db, request = farm_client
+    db.execute.return_value.rowcount = 0
+
+    response = asyncio.run(request(method="DELETE", farm_id=FARM_ID))
+
+    assert response.status_code == 404
+
+
+def test_delete_farm_with_references_returns_safe_409(farm_client):
+    from sqlalchemy.exc import IntegrityError
+
+    db, request = farm_client
+    db.execute.side_effect = IntegrityError(
+        "DELETE FROM farms",
+        {},
+        RuntimeError("foreign key violation"),
+    )
+    db.execute.side_effect.orig.sqlstate = "23503"
+
+    response = asyncio.run(request(method="DELETE", farm_id=FARM_ID))
+
+    assert response.status_code == 409
+    assert "foreign key violation" not in response.text
+
+
+def test_create_farm_database_error_returns_safe_503(farm_client):
+    from sqlalchemy.exc import OperationalError
+
+    db, request = farm_client
+    db.execute.side_effect = OperationalError(
+        "INSERT INTO farms", {}, RuntimeError("private database detail")
+    )
+
+    response = asyncio.run(
+        request(method="POST", json={"name": "New Farm"})
+    )
+
+    assert response.status_code == 503
+    assert "private database detail" not in response.text
+
+
+def test_update_farm_database_error_returns_safe_503(farm_client):
+    from sqlalchemy.exc import OperationalError
+
+    db, request = farm_client
+    db.execute.side_effect = OperationalError(
+        "UPDATE farms", {}, RuntimeError("private database detail")
+    )
+
+    response = asyncio.run(
+        request(method="PATCH", farm_id=FARM_ID, json={"name": "Changed"})
+    )
 
     assert response.status_code == 503
     assert "private database detail" not in response.text

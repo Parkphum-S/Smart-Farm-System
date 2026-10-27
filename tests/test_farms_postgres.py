@@ -276,3 +276,162 @@ def test_postgres_rejects_tenant_without_membership(
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Insufficient tenant permissions"
+
+
+def test_postgres_create_farm_via_api(http_client, farm_records):
+    records = farm_records
+    headers = login(http_client, records)
+    created_id = None
+
+    try:
+        response = http_client.post(
+            f"/api/v1/tenants/{records['tenant_a']}/farms",
+            headers=headers,
+            json={"name": "CRUD Created Farm", "timezone": "Asia/Bangkok"},
+        )
+        assert response.status_code == 201, response.text
+        body = response.json()
+        created_id = body["id"]
+        assert body["name"] == "CRUD Created Farm"
+        assert body["timezone"] == "Asia/Bangkok"
+
+        with records["owner_engine"].connect() as conn:
+            row = conn.execute(
+                text("""
+                    SELECT tenant_id, name, timezone
+                    FROM farms WHERE id = :farm_id
+                """),
+                {"farm_id": created_id},
+            ).one()
+        assert str(row.tenant_id) == str(records["tenant_a"])
+        assert row.name == "CRUD Created Farm"
+        assert row.timezone == "Asia/Bangkok"
+    finally:
+        if created_id:
+            with records["owner_engine"].begin() as conn:
+                conn.execute(
+                    text("DELETE FROM farms WHERE id = :farm_id"),
+                    {"farm_id": created_id},
+                )
+
+
+def test_postgres_update_farm_via_api(http_client, farm_records):
+    records = farm_records
+    headers = login(http_client, records)
+    farm_id = records["farm_a"]
+
+    try:
+        response = http_client.request(
+            "PATCH",
+            f"/api/v1/tenants/{records['tenant_a']}/farms/{farm_id}",
+            headers=headers,
+            json={"name": "CRUD Updated Farm"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["name"] == "CRUD Updated Farm"
+
+        with records["owner_engine"].connect() as conn:
+            name = conn.execute(
+                text("SELECT name FROM farms WHERE id = :farm_id"),
+                {"farm_id": farm_id},
+            ).scalar_one()
+        assert name == "CRUD Updated Farm"
+    finally:
+        with records["owner_engine"].begin() as conn:
+            conn.execute(
+                text("""
+                    UPDATE farms
+                    SET name = 'Tenant A Farm'
+                    WHERE id = :farm_id AND tenant_id = :tenant_id
+                """),
+                {"farm_id": farm_id, "tenant_id": records["tenant_a"]},
+            )
+
+
+def test_postgres_delete_farm_via_api(http_client, farm_records):
+    records = farm_records
+    headers = login(http_client, records)
+    created_id = None
+
+    try:
+        response = http_client.post(
+            f"/api/v1/tenants/{records['tenant_a']}/farms",
+            headers=headers,
+            json={"name": "CRUD Delete Farm"},
+        )
+        assert response.status_code == 201, response.text
+        created_id = response.json()["id"]
+
+        response = http_client.request(
+            "DELETE",
+            f"/api/v1/tenants/{records['tenant_a']}/farms/{created_id}",
+            headers=headers,
+        )
+        assert response.status_code == 204, response.text
+
+        with records["owner_engine"].connect() as conn:
+            exists = conn.execute(
+                text("SELECT EXISTS(SELECT 1 FROM farms WHERE id = :farm_id)"),
+                {"farm_id": created_id},
+            ).scalar_one()
+        assert exists is False
+        created_id = None
+    finally:
+        if created_id:
+            with records["owner_engine"].begin() as conn:
+                conn.execute(
+                    text("DELETE FROM farms WHERE id = :farm_id"),
+                    {"farm_id": created_id},
+                )
+
+
+def test_postgres_delete_farm_referenced_by_zone_returns_409(
+    http_client, farm_records
+):
+    records = farm_records
+    headers = login(http_client, records)
+    created_id = None
+    zone_id = uuid4()
+
+    try:
+        response = http_client.post(
+            f"/api/v1/tenants/{records['tenant_a']}/farms",
+            headers=headers,
+            json={"name": "CRUD Referenced Farm"},
+        )
+        assert response.status_code == 201, response.text
+        created_id = response.json()["id"]
+
+        with records["owner_engine"].begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO zones (id, tenant_id, farm_id, name)
+                    VALUES (:id, :tenant_id, :farm_id, :name)
+                """),
+                {
+                    "id": zone_id,
+                    "tenant_id": records["tenant_a"],
+                    "farm_id": created_id,
+                    "name": "CRUD Reference Zone",
+                },
+            )
+
+        response = http_client.request(
+            "DELETE",
+            f"/api/v1/tenants/{records['tenant_a']}/farms/{created_id}",
+            headers=headers,
+        )
+        assert response.status_code == 409, response.text
+        assert "foreign key" not in response.text.lower()
+
+    finally:
+        with records["owner_engine"].begin() as conn:
+            conn.execute(
+                text("DELETE FROM zones WHERE id = :zone_id"),
+                {"zone_id": zone_id},
+            )
+            if created_id:
+                conn.execute(
+                    text("DELETE FROM farms WHERE id = :farm_id"),
+                    {"farm_id": created_id},
+                )
