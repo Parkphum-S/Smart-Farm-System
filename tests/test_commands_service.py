@@ -8,6 +8,7 @@ from app.schemas.commands import CommandCreate, CommandEventCreate
 from app.security.device_auth import DeviceIdentity
 from app.services.commands import (
     CommandConflict,
+    CommandExpired,
     CommandNotFound,
     CommandRejected,
     pending_commands,
@@ -344,6 +345,50 @@ def test_record_command_event_rejects_invalid_state_transition():
     assert db.execute.call_count == 4
 
 
+def test_record_command_event_rejects_new_event_for_expired_command():
+    identity = make_identity()
+    row = make_command(identity, status="expired")
+    event = CommandEventCreate(
+        event_id="event-after-expiry",
+        event_type="acknowledged",
+    )
+    db = Mock()
+    db.execute.side_effect = [
+        expired_result(),
+        result_with(row),
+        result_with(None),
+    ]
+
+    with pytest.raises(CommandConflict):
+        record_command_event(db, identity, row["id"], event)
+
+    # Must reject the transition without inserting a device event or updating
+    # the command back into an active state.
+    assert db.execute.call_count == 3
+
+
+def test_record_command_event_rejects_event_when_expiry_guard_fires():
+    identity = make_identity()
+    row = make_command(identity, status="sent")
+    event = CommandEventCreate(
+        event_id="event-expiry-guard",
+        event_type="acknowledged",
+    )
+    db = Mock()
+    db.execute.side_effect = [
+        expired_result(),
+        result_with(row),
+        result_with(None),
+        scalar_result(True),
+    ]
+
+    with pytest.raises(CommandExpired):
+        record_command_event(db, identity, row["id"], event)
+
+    # The expiry guard must stop processing before event insertion.
+    assert db.execute.call_count == 4
+
+
 def test_record_command_event_records_success_and_result_summary():
     identity = make_identity()
     row = make_command(identity, status="acknowledged")
@@ -377,9 +422,9 @@ def test_record_command_event_records_success_and_result_summary():
     assert db.execute.call_count == 5
 
 
-def test_record_command_event_accepts_identical_duplicate():
+def test_record_command_event_accepts_identical_duplicate_after_expiry():
     identity = make_identity()
-    row = make_command(identity, status="sent")
+    row = make_command(identity, status="expired")
     occurred_at = NOW
     details = {"relay": 1}
     event = CommandEventCreate(

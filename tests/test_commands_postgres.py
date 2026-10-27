@@ -14,8 +14,14 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
-from app.schemas.commands import CommandCreate
-from app.services.commands import CommandConflict, create_command
+from app.schemas.commands import CommandCreate, CommandEventCreate
+from app.security.device_auth import DeviceIdentity
+from app.services.commands import (
+    CommandConflict,
+    create_command,
+    pending_commands,
+    record_command_event,
+)
 
 
 WORKERS = 8
@@ -265,6 +271,147 @@ def database_counts(context, key):
     return command_rows, {
         row["event_type"]: row["n"] for row in event_rows
     }
+
+
+def _create_expired_command(context, key):
+    request = make_request(key)
+    with context["sessions"]() as db:
+        with db.begin():
+            row, _ = create_command(
+                db,
+                tenant_id=context["tenant_id"],
+                device_id=context["device_id"],
+                user_id=context["user_id"],
+                request=request,
+            )
+            command_id = row["id"]
+
+    # Use the owner connection only to prepare an expired test fixture.
+    # Keep expires_at > created_at to satisfy the database check constraint.
+    with context["owner_engine"].begin() as conn:
+        conn.execute(
+            text("""
+                UPDATE commands
+                SET created_at = CURRENT_TIMESTAMP - INTERVAL '10 seconds',
+                    expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
+                WHERE tenant_id = :tenant_id
+                  AND device_id = :device_id
+                  AND id = :command_id
+            """),
+            {
+                "tenant_id": context["tenant_id"],
+                "device_id": context["device_id"],
+                "command_id": command_id,
+            },
+        )
+
+    return command_id
+
+
+def test_postgres_pending_commands_expires_stale_command(command_context):
+    context = command_context
+    command_id = _create_expired_command(
+        context, f"expiry-pending-{uuid4()}"
+    )
+    identity = DeviceIdentity(
+        tenant_id=context["tenant_id"],
+        device_id=context["device_id"],
+    )
+
+    with context["sessions"]() as db:
+        with db.begin():
+            result = pending_commands(db, identity)
+
+    assert result == []
+
+    with context["owner_engine"].connect() as conn:
+        status = conn.execute(
+            text("""
+                SELECT status FROM commands
+                WHERE tenant_id = :tenant_id AND id = :command_id
+            """),
+            {
+                "tenant_id": context["tenant_id"],
+                "command_id": command_id,
+            },
+        ).scalar_one()
+
+        events = conn.execute(
+            text("""
+                SELECT event_type, actor_type, count(*) AS n
+                FROM command_events
+                WHERE tenant_id = :tenant_id AND command_id = :command_id
+                GROUP BY event_type, actor_type
+            """),
+            {
+                "tenant_id": context["tenant_id"],
+                "command_id": command_id,
+            },
+        ).mappings().all()
+
+    assert status == "expired"
+    assert {
+        (event["event_type"], event["actor_type"]): event["n"]
+        for event in events
+    } == {
+        ("created", "user"): 1,
+        ("expired", "system"): 1,
+    }
+
+
+def test_postgres_rejects_new_event_for_expired_command(command_context):
+    context = command_context
+    command_id = _create_expired_command(
+        context, f"expiry-event-{uuid4()}"
+    )
+    identity = DeviceIdentity(
+        tenant_id=context["tenant_id"],
+        device_id=context["device_id"],
+    )
+
+    # Commit expiry first, so the rejected event transaction cannot roll it back.
+    with context["sessions"]() as db:
+        with db.begin():
+            assert pending_commands(db, identity) == []
+
+    event = CommandEventCreate(
+        event_id=f"late-ack-{uuid4()}",
+        event_type="acknowledged",
+    )
+    with context["sessions"]() as db:
+        with pytest.raises(CommandConflict):
+            with db.begin():
+                record_command_event(db, identity, command_id, event)
+
+    with context["owner_engine"].connect() as conn:
+        status = conn.execute(
+            text("""
+                SELECT status FROM commands
+                WHERE tenant_id = :tenant_id AND id = :command_id
+            """),
+            {
+                "tenant_id": context["tenant_id"],
+                "command_id": command_id,
+            },
+        ).scalar_one()
+
+        counts = conn.execute(
+            text("""
+                SELECT event_type, count(*) AS n
+                FROM command_events
+                WHERE tenant_id = :tenant_id AND command_id = :command_id
+                GROUP BY event_type
+            """),
+            {
+                "tenant_id": context["tenant_id"],
+                "command_id": command_id,
+            },
+        ).mappings().all()
+
+    assert status == "expired"
+    assert {
+        row["event_type"]: row["n"] for row in counts
+    } == {"created": 1, "expired": 1}
 
 
 def test_concurrent_identical_requests_create_one_command_and_event(
