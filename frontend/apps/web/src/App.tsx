@@ -149,6 +149,11 @@ function formatTenantDisplayId(tenantId: string): string {
 
 export default function App() {
   const [selectedPage, setSelectedPage] = useState("dashboard");
+  const [selectedDeviceZone, setSelectedDeviceZone] = useState<{
+    id: string;
+    name: string;
+    farmId: string;
+  } | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [selectedRange, setSelectedRange] = useState("24 ชั่วโมง");
   const [selectedVariable, setSelectedVariable] = useState("อุณหภูมิ");
@@ -617,7 +622,7 @@ useLayoutEffect(() => {
     return () => {
       cancelled = true;
     };
-  }, [selectedPage, tenantId, authorizedTenants, tenantListLoading, devicesReloadKey]);
+  }, [selectedPage, tenantId, selectedFarm?.id, authorizedTenants, tenantListLoading, devicesReloadKey]);
 
   useEffect(() => {
     if (selectedPage !== "devices" || tenantListLoading) {
@@ -1142,6 +1147,7 @@ useLayoutEffect(() => {
                     onChange={(event) => {
                       setTenantId(event.target.value);
                       setSelectedFarm(null);
+                      setSelectedDeviceZone(null);
                       setCopiedField("");
                       setFarmFormMode(null);
                       setFarmName("");
@@ -1290,6 +1296,7 @@ useLayoutEffect(() => {
                             ...farm,
                             displayId: `FARM-${String(index + 1).padStart(2, "0")}`,
                           });
+                          setSelectedDeviceZone(null);
                           setCopiedField("");
                           navigate("farm-detail");
                         }}
@@ -1881,8 +1888,21 @@ useLayoutEffect(() => {
                                 <br />
                                 <small>แก้ไขล่าสุด {formatThaiDate(zone.updated_at)}</small>
                               </div>
-                              {canManage && (
-                                <div className="zone-card-actions">
+                              <div className="zone-card-actions">
+                                <button
+                                  className="secondary-button"
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedDeviceZone({
+                                      id: zone.id,
+                                      name: zone.name,
+                                      farmId: zone.farm_id,
+                                    });
+                                    navigate("devices");
+                                  }}
+                                >ดูอุปกรณ์และค่าเซนเซอร์</button>
+                                {canManage && (
+                                  <>
                                   <button
                                     className="secondary-button"
                                     type="button"
@@ -1934,8 +1954,9 @@ useLayoutEffect(() => {
                                       }
                                     }}
                                   >ลบ</button>
-                                </div>
-                              )}
+                                  </>
+                                )}
+                              </div>
                             </article>
                           ))}
                         </div>
@@ -1982,10 +2003,24 @@ useLayoutEffect(() => {
                   )}
                 </div>
 
+                {selectedDeviceZone && (
+                  <div className="device-tenant-context">
+                    <p>
+                      กำลังแสดงโซน: <strong>{selectedDeviceZone.name}</strong>
+                    </p>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      disabled={devicesLoading || !authorizedDeviceTenant}
+                      onClick={() => setDevicesReloadKey((key) => key + 1)}
+                    >โหลดอุปกรณ์ทั้งหมดในโซนนี้</button>
+                  </div>
+                )}
+
                 <div className="device-list-toolbar">
                   <span>
                     {devicesRequested && !devicesLoading && !devicesError
-                      ? `${devices.length} อุปกรณ์`
+                      ? `${(selectedFarm ? devices.filter((device) => device.farm_id === selectedFarm.id) : []).filter((device) => !selectedDeviceZone || (device.zone_id === selectedDeviceZone.id && device.farm_id === selectedDeviceZone.farmId)).length} อุปกรณ์`
                       : "รายการอุปกรณ์"}
                   </span>
                   <button
@@ -2031,7 +2066,7 @@ useLayoutEffect(() => {
                   </div>
                 )}
 
-                {!devicesError && !devicesLoading && devicesRequested && devices.length === 0 && (
+                {!devicesError && !devicesLoading && devicesRequested && (!selectedFarm || !devices.some((device) => device.farm_id === selectedFarm.id)) && !selectedDeviceZone && (
                   <div className="farm-list-empty">
                     <span className="zone-empty-symbol" aria-hidden="true">▣</span>
                     <h3>ไม่พบรายการอุปกรณ์</h3>
@@ -2039,9 +2074,21 @@ useLayoutEffect(() => {
                   </div>
                 )}
 
-                {!devicesError && !devicesLoading && devices.length > 0 && (
+                {!devicesError && !devicesLoading && devicesRequested && selectedDeviceZone && !devices.some((device) => device.farm_id === selectedFarm?.id && device.zone_id === selectedDeviceZone.id && device.farm_id === selectedDeviceZone.farmId) && (
+                  <div className="farm-list-empty">
+                    <span className="zone-empty-symbol" aria-hidden="true">▣</span>
+                    <h3>ยังไม่มีอุปกรณ์ในโซนนี้</h3>
+                    <p>ไม่พบอุปกรณ์ที่ผูกกับโซน {selectedDeviceZone.name} ในฟาร์มที่เลือก ตรวจสอบการกำหนด Zone ของอุปกรณ์ได้จากรายการอุปกรณ์ทั้งหมด</p>
+                  </div>
+                )}
+
+                {!devicesError && !devicesLoading && selectedFarm && (selectedDeviceZone
+                  ? devices.some((device) => device.farm_id === selectedFarm.id && device.zone_id === selectedDeviceZone.id && device.farm_id === selectedDeviceZone.farmId)
+                  : devices.some((device) => device.farm_id === selectedFarm.id)) && (
                   <div className="device-list" aria-label="รายการอุปกรณ์">
-                    {devices.map((device) => {
+                    {(devices.filter((device) => device.farm_id === selectedFarm.id))
+                      .filter((device) => !selectedDeviceZone || (device.zone_id === selectedDeviceZone.id && device.farm_id === selectedDeviceZone.farmId))
+                      .map((device) => {
                       const statusLabels: Record<string, string> = {
                         active: "เปิดใช้งาน",
                         pending: "รอเปิดใช้งาน",
