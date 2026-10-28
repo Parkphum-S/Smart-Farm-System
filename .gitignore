@@ -45,3 +45,4 @@ Thumbs.db
 
 # Local ESP32 credentials
 /esp32_firmware/secrets.h
+/frontend/apps/web/tsconfig.tsbuildinfo

@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ApiError, authApi, commandApi, deviceApi, farmApi, zoneApi } from "./services/api";
+import { ApiError, authApi, commandApi, deviceApi, farmApi, telemetryApi, zoneApi } from "./services/api";
 import type { Farm, TenantAccess } from "./services/api";
 import type { DeviceCommand } from "./services/api";
-import type { Device } from "./services/api";
+import type { Device, TelemetryReading } from "./services/api";
 import type { Zone, ZoneType, ZoneCategoryDetails } from "./services/api";
 import { zoneTypeLabels } from "./services/api";
 
@@ -216,7 +216,18 @@ export default function App() {
   const [devicesError, setDevicesError] = useState("");
   const [devicesRequested, setDevicesRequested] = useState(false);
   const [devicesReloadKey, setDevicesReloadKey] = useState(0);
+  const [deviceZonesByFarm, setDeviceZonesByFarm] = useState<Record<string, Zone[]>>({});
+  const [deviceZoneLoading, setDeviceZoneLoading] = useState<Record<string, boolean>>({});
+  const [deviceZoneLoadErrors, setDeviceZoneLoadErrors] = useState<Record<string, string>>({});
+  const [deviceZoneSaving, setDeviceZoneSaving] = useState<Record<string, boolean>>({});
+  const [deviceZoneMessages, setDeviceZoneMessages] = useState<Record<string, string>>({});
+  const [deviceZoneErrors, setDeviceZoneErrors] = useState<Record<string, string>>({});
   const [copiedField, setCopiedField] = useState("");
+  const [telemetryReadings, setTelemetryReadings] = useState<TelemetryReading[]>([]);
+  const [telemetryLoading, setTelemetryLoading] = useState(false);
+  const [telemetryError, setTelemetryError] = useState("");
+  const [telemetryRequested, setTelemetryRequested] = useState(false);
+  const [telemetryReloadKey, setTelemetryReloadKey] = useState(0);
 
 const [relayBusyKey, setRelayBusyKey] = useState("");
 const [relayPanelsOpen, setRelayPanelsOpen] = useState<Record<string, boolean>>({});
@@ -607,6 +618,111 @@ useLayoutEffect(() => {
       cancelled = true;
     };
   }, [selectedPage, tenantId, authorizedTenants, tenantListLoading, devicesReloadKey]);
+
+  useEffect(() => {
+    if (selectedPage !== "devices" || tenantListLoading) {
+      return;
+    }
+
+    if (!authorizedDeviceTenant) {
+      setDeviceZonesByFarm({});
+      setDeviceZoneLoading({});
+      setDeviceZoneLoadErrors({});
+      return;
+    }
+
+    const requestedTenantId = authorizedDeviceTenant.id;
+    const farmIds = [...new Set(
+      devices
+        .map((device) => device.farm_id)
+        .filter((farmId): farmId is string => Boolean(farmId)),
+    )];
+
+    let cancelled = false;
+    setDeviceZoneLoading(Object.fromEntries(farmIds.map((id) => [id, true])));
+    setDeviceZoneLoadErrors({});
+
+    void Promise.all(
+      farmIds.map(async (farmId) => {
+        try {
+          const result = await zoneApi.list(requestedTenantId, farmId);
+          return { farmId, zones: result, error: "" };
+        } catch (error) {
+          return {
+            farmId,
+            zones: [] as Zone[],
+            error: error instanceof Error
+              ? error.message
+              : "โหลดรายการ Zone ไม่สำเร็จ",
+          };
+        }
+      }),
+    ).then((results) => {
+      if (cancelled || tenantContextRef.current !== requestedTenantId) return;
+
+      const nextZones: Record<string, Zone[]> = {};
+      const nextErrors: Record<string, string> = {};
+      const nextLoading: Record<string, boolean> = {};
+
+      for (const result of results) {
+        nextZones[result.farmId] = result.zones;
+        nextLoading[result.farmId] = false;
+        if (result.error) nextErrors[result.farmId] = result.error;
+      }
+
+      setDeviceZonesByFarm(nextZones);
+      setDeviceZoneLoadErrors(nextErrors);
+      setDeviceZoneLoading(nextLoading);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPage, tenantListLoading, authorizedDeviceTenant, devices]);
+
+  useEffect(() => {
+    if (selectedPage !== "devices" || tenantListLoading) {
+      return;
+    }
+
+    if (!authorizedDeviceTenant) {
+      setTelemetryReadings([]);
+      setTelemetryError("");
+      setTelemetryRequested(false);
+      setTelemetryLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const requestedTenantId = authorizedDeviceTenant.id;
+
+    setTelemetryReadings([]);
+    setTelemetryLoading(true);
+    setTelemetryError("");
+    setTelemetryRequested(true);
+
+    telemetryApi.list(requestedTenantId, { latest_only: true, limit: 100 })
+      .then((result) => {
+        if (cancelled) return;
+        setTelemetryReadings(result);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setTelemetryReadings([]);
+        setTelemetryError(
+          error instanceof ApiError
+            ? error.message
+            : "ไม่สามารถโหลดค่าเซนเซอร์ได้ กรุณาลองใหม่",
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setTelemetryLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPage, authorizedDeviceTenant?.id, tenantListLoading, telemetryReloadKey]);
 
   const page = pageTitles[selectedPage] ?? pageTitles.dashboard;
 
@@ -1963,6 +2079,183 @@ useLayoutEffect(() => {
                               <dd>{device.farm_id ?? "ยังไม่ได้ผูกกับฟาร์ม"}</dd>
                             </div>
                           </dl>
+                          <section
+                            className="device-telemetry"
+                            aria-label={`ค่าเซนเซอร์ล่าสุดของ ${device.name}`}
+                          >
+                            <div className="device-telemetry-header">
+                              <h4>ค่าเซนเซอร์ล่าสุด</h4>
+                              <button
+                                type="button"
+                                className="secondary-button"
+                                disabled={telemetryLoading || !authorizedDeviceTenant}
+                                onClick={() => setTelemetryReloadKey((key) => key + 1)}
+                              >
+                                {telemetryLoading ? "กำลังโหลด…" : "รีเฟรช"}
+                              </button>
+                            </div>
+
+                            {telemetryLoading && (
+                              <p className="telemetry-message" role="status">
+                                กำลังโหลดค่าเซนเซอร์…
+                              </p>
+                            )}
+
+                            {!telemetryLoading && telemetryError && (
+                              <div className="telemetry-message telemetry-error" role="alert">
+                                <p>{telemetryError}</p>
+                              </div>
+                            )}
+
+                            {!telemetryLoading && !telemetryError && telemetryRequested &&
+                              telemetryReadings.filter((reading) => reading.device_id === device.id).length === 0 && (
+                                <p className="telemetry-message">
+                                  ยังไม่มีข้อมูลเซนเซอร์สำหรับอุปกรณ์นี้
+                                </p>
+                              )}
+
+                            {!telemetryLoading && !telemetryError &&
+                              telemetryReadings.some((reading) => reading.device_id === device.id) && (
+                                <div className="telemetry-grid">
+                                  {telemetryReadings
+                                    .filter((reading) => reading.device_id === device.id)
+                                    .map((reading) => {
+                                      const metricLabels: Record<string, string> = {
+                                        air_temperature: "อุณหภูมิอากาศ",
+                                        air_humidity: "ความชื้นอากาศ",
+                                        soil_moisture: "ความชื้นดิน",
+                                        vpd: "VPD",
+                                      };
+
+                                      return (
+                                        <article className="telemetry-card" key={reading.id}>
+                                          <div className="telemetry-card-heading">
+                                            <div>
+                                              <h4>{metricLabels[reading.metric] ?? reading.metric}</h4>
+                                              <p>เซนเซอร์ {reading.sensor_code}</p>
+                                            </div>
+                                            <span className="telemetry-quality">
+                                              {reading.quality_status}
+                                            </span>
+                                          </div>
+                                          <p className="telemetry-value">
+                                            {Number.isFinite(reading.value)
+                                              ? reading.value.toLocaleString("th-TH", {
+                                                  maximumFractionDigits: 4,
+                                                })
+                                              : "—"}
+                                            <span>{reading.unit || ""}</span>
+                                          </p>
+                                          <p className="telemetry-time">
+                                            วัดเมื่อ:{" "}
+                                            <time dateTime={reading.measured_at}>
+                                              {formatThaiDate(reading.measured_at)}
+                                            </time>
+                                          </p>
+                                        </article>
+                                      );
+                                    })}
+                                </div>
+                              )}
+                          </section>
+                          <section className="device-zone-assignment" aria-label={`กำหนด Zone ให้ ${device.name}`}>
+                            <label htmlFor={`device-zone-${device.id}`}>Zone</label>
+                            {!device.farm_id ? (
+                              <p className="device-zone-note">ต้องผูกอุปกรณ์กับ Farm ก่อน จึงจะกำหนด Zone ได้</p>
+                            ) : deviceZoneLoadErrors[device.farm_id] ? (
+                              <p className="device-zone-error" role="alert">
+                                โหลด Zone ไม่สำเร็จ: {deviceZoneLoadErrors[device.farm_id]}
+                              </p>
+                            ) : (
+                              <>
+                                <select
+                                  id={`device-zone-${device.id}`}
+                                  value={device.zone_id ?? ""}
+                                  disabled={
+                                    !authorizedDeviceTenant ||
+                                    !["owner", "operator"].includes(authorizedDeviceTenant.role) ||
+                                    Boolean(deviceZoneLoading[device.farm_id]) ||
+                                    Boolean(deviceZoneSaving[device.id])
+                                  }
+                                  onChange={async (event) => {
+                                    const nextZoneId = event.target.value || null;
+                                    const currentTenantId = authorizedDeviceTenant?.id;
+                                    if (
+                                      !currentTenantId ||
+                                      !["owner", "operator"].includes(authorizedDeviceTenant.role) ||
+                                      !device.farm_id
+                                    ) return;
+
+                                    const allowedZones = deviceZonesByFarm[device.farm_id] ?? [];
+                                    if (nextZoneId && !allowedZones.some((zone) => zone.id === nextZoneId)) {
+                                      setDeviceZoneErrors((prev) => ({
+                                        ...prev,
+                                        [device.id]: "Zone ที่เลือกไม่อยู่ใน Farm ของอุปกรณ์",
+                                      }));
+                                      return;
+                                    }
+
+                                    setDeviceZoneSaving((prev) => ({ ...prev, [device.id]: true }));
+                                    setDeviceZoneErrors((prev) => ({ ...prev, [device.id]: "" }));
+                                    setDeviceZoneMessages((prev) => ({ ...prev, [device.id]: "" }));
+
+                                    try {
+                                      const updated = await deviceApi.assignZone(
+                                        currentTenantId,
+                                        device.id,
+                                        nextZoneId,
+                                      );
+                                      if (tenantContextRef.current !== currentTenantId) return;
+
+                                      setDevices((prev) =>
+                                        prev.map((item) => item.id === updated.id ? updated : item),
+                                      );
+                                      setDeviceZoneMessages((prev) => ({
+                                        ...prev,
+                                        [device.id]: nextZoneId
+                                          ? "บันทึก Zone สำเร็จ"
+                                          : "ยกเลิกการกำหนด Zone แล้ว",
+                                      }));
+                                    } catch (error) {
+                                      if (tenantContextRef.current !== currentTenantId) return;
+                                      setDeviceZoneErrors((prev) => ({
+                                        ...prev,
+                                        [device.id]: error instanceof Error
+                                          ? error.message
+                                          : "บันทึก Zone ไม่สำเร็จ",
+                                      }));
+                                    } finally {
+                                      setDeviceZoneSaving((prev) => ({ ...prev, [device.id]: false }));
+                                    }
+                                  }}
+                                >
+                                  <option value="">ยังไม่กำหนด Zone</option>
+                                  {(deviceZonesByFarm[device.farm_id] ?? []).map((zone) => (
+                                    <option key={zone.id} value={zone.id}>
+                                      {zone.name}{zone.status === "disabled" ? " (ปิดใช้งาน)" : ""}
+                                    </option>
+                                  ))}
+                                </select>
+                                {deviceZoneLoading[device.farm_id] && (
+                                  <p className="device-zone-note" role="status">กำลังโหลด Zone…</p>
+                                )}
+                                {!deviceZoneLoading[device.farm_id] &&
+                                  !deviceZoneLoadErrors[device.farm_id] &&
+                                  (deviceZonesByFarm[device.farm_id] ?? []).length === 0 && (
+                                    <p className="device-zone-note">Farm นี้ยังไม่มี Zone</p>
+                                  )}
+                              </>
+                            )}
+                            {deviceZoneSaving[device.id] && (
+                              <p className="device-zone-note" role="status">กำลังบันทึก…</p>
+                            )}
+                            {deviceZoneMessages[device.id] && (
+                              <p className="device-zone-success" role="status">{deviceZoneMessages[device.id]}</p>
+                            )}
+                            {deviceZoneErrors[device.id] && (
+                              <p className="device-zone-error" role="alert">{deviceZoneErrors[device.id]}</p>
+                            )}
+                          </section>
                           <button
                             type="button"
                             className="secondary-button relay-panel-toggle"
@@ -2398,6 +2691,7 @@ useLayoutEffect(() => {
                 <p className="farm-helper-text device-api-note">
                   สถานะ Relay แสดงผลตามรายงานคำสั่งจาก API ไม่ใช่การวัดสถานะฮาร์ดแวร์โดยตรง
                 </p>
+
               </section>
             </div>
           ) : (

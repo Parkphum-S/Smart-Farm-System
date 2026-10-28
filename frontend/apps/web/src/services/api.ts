@@ -242,6 +242,7 @@ export interface Device {
   name: string;
   status: "pending" | "active" | "disabled" | "revoked" | string;
   farm_id: string | null;
+  zone_id: string | null;
   last_seen_at: string | null;
   created_at: string;
   updated_at: string;
@@ -251,6 +252,54 @@ export const deviceApi = {
   list(tenantId: string): Promise<Device[]> {
     return request<Device[]>(
       `/api/v1/tenants/${encodeURIComponent(tenantId)}/devices`,
+    );
+  },
+
+  assignZone(
+    tenantId: string,
+    deviceId: string,
+    zoneId: string | null,
+  ): Promise<Device> {
+    return request<Device>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/devices/${encodeURIComponent(deviceId)}/zone`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ zone_id: zoneId }),
+      },
+    );
+  },
+};
+
+export interface TelemetryReading {
+  id: string;
+  sensor_id: string;
+  sensor_code: string;
+  device_id: string;
+  device_name: string;
+  metric: string;
+  value: number;
+  unit: string;
+  quality_status: string;
+  measured_at: string;
+  received_at: string;
+}
+
+export const telemetryApi = {
+  list(
+    tenantId: string,
+    params: { latest_only?: boolean; limit?: number } = {},
+  ): Promise<TelemetryReading[]> {
+    const query = new URLSearchParams();
+    if (params.latest_only !== undefined) {
+      query.set("latest_only", String(params.latest_only));
+    }
+    if (params.limit !== undefined) {
+      query.set("limit", String(params.limit));
+    }
+
+    const suffix = query.toString();
+    return request<TelemetryReading[]>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/telemetry/readings${suffix ? `?${suffix}` : ""}`,
     );
   },
 };

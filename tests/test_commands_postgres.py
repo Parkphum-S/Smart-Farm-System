@@ -74,7 +74,7 @@ def postgres_engines():
             revision = conn.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            if revision != "0007_zone_types_details":
+            if revision != "0008_device_zone_assignment":
                 pytest.fail(f"Unexpected test migration: {revision!r}")
 
         yield app_engine, owner_engine
