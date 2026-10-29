@@ -171,6 +171,7 @@ export default function App() {
   const [zoneCategoryDetails, setZoneCategoryDetails] = useState<ZoneCategoryDetails>({});
   const [zoneRelayMappingText, setZoneRelayMappingText] = useState("{}");
   const [editingZoneId, setEditingZoneId] = useState<string | null>(null);
+  const [zoneFormOpen, setZoneFormOpen] = useState(false);
   const [zoneSaving, setZoneSaving] = useState(false);
   const [zoneFormError, setZoneFormError] = useState("");
   const [zoneActionMessage, setZoneActionMessage] = useState("");
@@ -1118,10 +1119,25 @@ useLayoutEffect(() => {
                     <h2>รายการฟาร์ม</h2>
                     <p>ข้อมูลฟาร์มของ Tenant ที่บัญชีได้รับอนุญาต</p>
                   </div>
-                  <span className="section-note">
-                    <span className={`status-dot ${farmsError ? "status-dot-muted" : ""}`} />
-                    {farmsLoading ? "กำลังโหลด" : farmsError ? "โหลดข้อมูลไม่สำเร็จ" : farmsRequested ? "เชื่อมต่อ API แล้ว" : "รอเลือก Tenant"}
-                  </span>
+                  <div className="sf-heading-actions">
+                    <span className="section-note">
+                      <span className={`status-dot ${farmsError ? "status-dot-muted" : ""}`} />
+                      {farmsLoading ? "กำลังโหลด" : farmsError ? "โหลดข้อมูลไม่สำเร็จ" : farmsRequested ? "เชื่อมต่อ API แล้ว" : "รอเลือก Tenant"}
+                    </span>
+                    {canManageFarms && (
+                      <button
+                        className="primary-button"
+                        type="button"
+                        onClick={() => {
+                          setFarmName("");
+                          setFarmTimezone("Asia/Bangkok");
+                          setFarmActionError("");
+                          setFarmActionMessage("");
+                          setFarmFormMode("create");
+                        }}
+                      >+ เพิ่มฟาร์ม</button>
+                    )}
+                  </div>
                 </div>
 
                 <div className="farm-tenant-form">
@@ -1150,6 +1166,16 @@ useLayoutEffect(() => {
                       setSelectedDeviceZone(null);
                       setCopiedField("");
                       setFarmFormMode(null);
+                      setZoneFormOpen(false);
+                      setEditingZoneId(null);
+                      setZoneName("");
+                      setZoneDescription("");
+                      setZoneStatus("active");
+                      setZoneType("plant");
+                      setZoneCategoryDetails({});
+                      setZoneRelayMappingText("{}");
+                      setZoneFormError("");
+                      setZoneActionMessage("");
                       setFarmName("");
                       setFarmTimezone("Asia/Bangkok");
                       setFarmActionError("");
@@ -1198,7 +1224,9 @@ useLayoutEffect(() => {
                   </div>
                 )}
 
-                {canManageFarms && (
+                {canManageFarms && farmFormMode === "create" && (
+                  <div className="sf-modal-backdrop" role="presentation">
+                    <div className="sf-modal" role="dialog" aria-modal="true" aria-labelledby="farm-create-modal-title">
                   <form
                     className="farm-crud-form"
                     onSubmit={async (event) => {
@@ -1230,7 +1258,7 @@ useLayoutEffect(() => {
                       }
                     }}
                   >
-                    <h3>เพิ่มฟาร์ม</h3>
+                    <div className="sf-modal-header"><h3 id="farm-create-modal-title">เพิ่มฟาร์ม</h3><button className="secondary-button" type="button" disabled={farmSaving} aria-label="ปิดหน้าต่าง" onClick={() => { setFarmFormMode(null); setFarmActionError(""); }}>ปิด</button></div>
                     <label htmlFor="farm-create-name">ชื่อฟาร์ม</label>
                     <input
                       id="farm-create-name"
@@ -1263,6 +1291,8 @@ useLayoutEffect(() => {
                       </button>
                     </div>
                   </form>
+                    </div>
+                  </div>
                 )}
 
                 {farmsError && (
@@ -1298,6 +1328,16 @@ useLayoutEffect(() => {
                           });
                           setSelectedDeviceZone(null);
                           setCopiedField("");
+                          setZoneFormOpen(false);
+                          setEditingZoneId(null);
+                          setZoneName("");
+                          setZoneDescription("");
+                          setZoneStatus("active");
+                          setZoneType("plant");
+                          setZoneCategoryDetails({});
+                          setZoneRelayMappingText("{}");
+                          setZoneFormError("");
+                          setZoneActionMessage("");
                           navigate("farm-detail");
                         }}
                         aria-label={`จัดการฟาร์ม ${farm.name}`}
@@ -1332,6 +1372,8 @@ useLayoutEffect(() => {
                   </div>
 
                   {canManageFarms && farmFormMode === "edit" && (
+                    <div className="sf-modal-backdrop" role="presentation">
+                      <div className="sf-modal" role="dialog" aria-modal="true" aria-labelledby="farm-edit-modal-title">
                     <form
                       className="farm-crud-form"
                       onSubmit={async (event) => {
@@ -1363,7 +1405,7 @@ useLayoutEffect(() => {
                         }
                       }}
                     >
-                      <h3>แก้ไขข้อมูลฟาร์ม</h3>
+                      <div className="sf-modal-header"><h3 id="farm-edit-modal-title">แก้ไขข้อมูลฟาร์ม</h3><button className="secondary-button" type="button" disabled={farmSaving} aria-label="ปิดหน้าต่าง" onClick={() => { setFarmFormMode(null); setFarmActionError(""); }}>ปิด</button></div>
                       <label htmlFor="farm-edit-name">ชื่อฟาร์ม</label>
                       <input
                         id="farm-edit-name"
@@ -1406,6 +1448,8 @@ useLayoutEffect(() => {
                         </button>
                       </div>
                     </form>
+                      </div>
+                    </div>
                   )}
                   {farmActionMessage && <div className="farm-message" role="status">{farmActionMessage}</div>}
                   {farmActionError && farmFormMode !== "edit" && <div className="farm-message farm-message-error" role="alert">{farmActionError}</div>}
@@ -1548,9 +1592,6 @@ useLayoutEffect(() => {
                       ไปยัง Zone Management →
                     </button>
                   </div>
-                  <p className="farm-helper-text">
-                    หน้า Zone Management ปัจจุบันยังไม่มีข้อมูลโซนจริงเชื่อมต่อจาก API
-                  </p>
                 </>
               ) : (
                 <div className="farm-list-empty">
@@ -1574,10 +1615,32 @@ useLayoutEffect(() => {
                     <h2>Zone Management</h2>
                     <p>จัดการโซนเพาะปลูกภายในฟาร์มที่เลือก</p>
                   </div>
-                  <span className="section-note">
-                    <span className={`status-dot ${zonesError ? "status-dot-muted" : ""}`} />
-                    {zonesLoading ? "กำลังโหลด" : zonesError ? "โหลดข้อมูลไม่สำเร็จ" : zonesRequested ? "เชื่อมต่อ Zone API แล้ว" : "รอ Tenant และ Farm"}
-                  </span>
+                  <div className="sf-heading-actions">
+                    <span className="section-note">
+                      <span className={`status-dot ${zonesError ? "status-dot-muted" : ""}`} />
+                      {zonesLoading ? "กำลังโหลด" : zonesError ? "โหลดข้อมูลไม่สำเร็จ" :zonesRequested ? "เชื่อมต่อ Zone API แล้ว" : "รอ Tenant และ Farm"}
+                    </span>
+                    {selectedFarm && ["owner", "operator"].includes(
+                      authorizedTenants.find((item) => item.id.toLowerCase() === tenantId.trim().toLowerCase())?.role ?? ""
+                    ) && (
+                      <button
+                        className="primary-button"
+                        type="button"
+                        onClick={() => {
+                          setEditingZoneId(null);
+                          setZoneName("");
+                          setZoneDescription("");
+                          setZoneStatus("active");
+                          setZoneType("plant");
+                          setZoneCategoryDetails({});
+                          setZoneRelayMappingText("{}");
+                          setZoneFormError("");
+                          setZoneActionMessage("");
+                          setZoneFormOpen(true);
+                        }}
+                      >+ เพิ่มโซน</button>
+                    )}
+                  </div>
                 </div>
 
                 <div className="zone-context-panel">
@@ -1621,7 +1684,9 @@ useLayoutEffect(() => {
                   const canManage = role === "owner" || role === "operator";
                   return (
                     <>
-                      {canManage && selectedFarm && (
+                      {canManage && selectedFarm && zoneFormOpen && (
+                        <div className="sf-modal-backdrop" role="presentation">
+                          <div className="sf-modal" role="dialog" aria-modal="true" aria-labelledby="zone-modal-title">
                         <form
                           className="zone-form"
                           onSubmit={async (event) => {
@@ -1686,6 +1751,7 @@ useLayoutEffect(() => {
                               setZoneCategoryDetails({});
                               setZoneRelayMappingText("{}");
                               setEditingZoneId(null);
+                              setZoneFormOpen(false);
                               setZonesReloadKey((key) => key + 1);
                             } catch (error) {
                               setZoneFormError(error instanceof Error ? error.message : "บันทึกข้อมูลโซนไม่สำเร็จ");
@@ -1694,7 +1760,7 @@ useLayoutEffect(() => {
                             }
                           }}
                         >
-                          <h3>{editingZoneId ? "แก้ไขโซน" : "เพิ่มโซนใหม่"}</h3>
+                          <div className="sf-modal-header"><h3 id="zone-modal-title">{editingZoneId ? "แก้ไขโซน" : "เพิ่มโซนใหม่"}</h3><button className="secondary-button" type="button" disabled={zoneSaving} aria-label="ปิดหน้าต่าง" onClick={() => { setZoneFormOpen(false); setZoneFormError(""); }}>ปิด</button></div>
                           <label>
                             ชื่อโซน
                             <input
@@ -1836,11 +1902,14 @@ useLayoutEffect(() => {
                                   setZoneCategoryDetails({});
                                   setZoneRelayMappingText("{}");
                                   setZoneFormError("");
+                                  setZoneFormOpen(false);
                                 }}
                               >ยกเลิก</button>
                             )}
                           </div>
                         </form>
+                          </div>
+                        </div>
                       )}
 
                       {zoneActionMessage && <div className="farm-message" role="status">{zoneActionMessage}</div>}
@@ -1869,7 +1938,7 @@ useLayoutEffect(() => {
                         <div className="zone-list-empty">
                           <span className="zone-empty-symbol" aria-hidden="true">▦</span>
                           <h3>{zoneSearch.trim() ? "ไม่พบโซนที่ตรงกับคำค้นหา" : "ยังไม่มีโซนในฟาร์มนี้"}</h3>
-                          <p>{canManage ? "เพิ่มโซนผ่านแบบฟอร์มด้านบนได้" : "บัญชีนี้มีสิทธิ์ดูข้อมูลเท่านั้น"}</p>
+                          <p>{canManage ? "กดปุ่ม + เพิ่มโซน เพื่อเริ่มต้น" : "บัญชีนี้มีสิทธิ์ดูข้อมูลเท่านั้น"}</p>
                         </div>
                       )}
                       {!zonesLoading && !zonesError && zones.length > 0 && (
@@ -1919,6 +1988,7 @@ useLayoutEffect(() => {
                                       );
                                       setZoneFormError("");
                                       setZoneActionMessage("");
+                                      setZoneFormOpen(true);
                                     }}
                                   >แก้ไข</button>
                                   <button
@@ -1944,6 +2014,7 @@ useLayoutEffect(() => {
                                           setZoneType("plant");
                                           setZoneCategoryDetails({});
                                           setZoneRelayMappingText("{}");
+                                          setZoneFormOpen(false);
                                         }
                                         setZoneActionMessage("ลบโซนแล้ว");
                                         setZonesReloadKey((key) => key + 1);
