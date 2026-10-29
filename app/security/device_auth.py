@@ -16,6 +16,7 @@ _HASH_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 class DeviceIdentity:
     tenant_id: UUID
     device_id: UUID
+    credential_id: UUID | None = None
 
 
 def generate_device_token() -> tuple[str, str]:
@@ -51,7 +52,7 @@ def authenticate_device(
         return None
 
     statement = text(
-        "SELECT d.tenant_id, d.id AS device_id "
+        "SELECT d.tenant_id, d.id AS device_id, c.id AS credential_id "
         "FROM device_credentials AS c "
         "JOIN devices AS d "
         "ON d.tenant_id = c.tenant_id AND d.id = c.device_id "
@@ -76,4 +77,5 @@ def authenticate_device(
     return DeviceIdentity(
         tenant_id=row["tenant_id"],
         device_id=row["device_id"],
+        credential_id=row["credential_id"],
     )

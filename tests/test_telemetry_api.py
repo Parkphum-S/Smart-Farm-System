@@ -180,3 +180,40 @@ def test_database_error_is_logged_without_secrets(client, monkeypatch, caplog):
     assert "OperationalError" in caplog.text
     assert "test-token" not in caplog.text
     assert "database" not in caplog.text
+
+
+def test_successful_telemetry_logs_credential_without_secrets(
+    client, monkeypatch, caplog
+):
+    import logging
+
+    _, request = client
+    credential_id = UUID("44444444-4444-4444-8444-444444444444")
+    identity = DeviceIdentity(
+        tenant_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        device_id=UUID(VALID_EVENT["device_id"]),
+        credential_id=credential_id,
+    )
+    monkeypatch.setattr(
+        telemetry_api,
+        "authenticate_device",
+        Mock(return_value=identity),
+    )
+    monkeypatch.setattr(
+        telemetry_api,
+        "ingest_telemetry",
+        Mock(return_value=IngestResult(UUID(int=1), False)),
+    )
+
+    token = "test-token-must-not-appear-in-logs"
+    with caplog.at_level(logging.INFO, logger="app.api.telemetry"):
+        response = asyncio.run(
+            request(VALID_EVENT, {"Authorization": f"Bearer {token}"})
+        )
+
+    assert response.status_code == 202
+    assert VALID_EVENT["event_id"] in caplog.text
+    assert VALID_EVENT["device_id"] in caplog.text
+    assert str(credential_id) in caplog.text
+    assert token not in caplog.text
+    assert "secret_hash" not in caplog.text

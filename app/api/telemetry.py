@@ -22,6 +22,18 @@ from app.services.telemetry import (
 
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not any(
+    getattr(handler, "_smartfarm_telemetry_handler", False)
+    for handler in logger.handlers
+):
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(levelname)s: %(name)s: %(message)s")
+    )
+    handler._smartfarm_telemetry_handler = True
+    logger.addHandler(handler)
+logger.propagate = False
 router = APIRouter(tags=["telemetry"])
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -81,6 +93,14 @@ def submit_telemetry(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telemetry storage temporarily unavailable",
         ) from None
+
+    logger.info(
+        "Telemetry accepted: device_id=%s credential_id=%s event_id=%s duplicate=%s",
+        identity.device_id,
+        identity.credential_id,
+        event.event_id,
+        result.duplicate,
+    )
 
     return {
         "event_id": str(event.event_id),
