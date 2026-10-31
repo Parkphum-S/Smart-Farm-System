@@ -32,6 +32,10 @@ DEVICE_ROW = {
     "status": "active",
     "farm_id": FARM_ID,
     "zone_id": None,
+    "platform": None,
+    "protocol": None,
+    "vendor": None,
+    "capabilities": {},
     "last_seen_at": CREATED_AT,
     "created_at": CREATED_AT,
     "updated_at": CREATED_AT,
@@ -67,25 +71,35 @@ def device_client(monkeypatch):
         method="GET",
         device_id=DEVICE_ID,
         json=None,
+        endpoint="zone",
+        content=None,
+        headers=None,
     ):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://testserver",
         ) as client:
-            headers = (
+            request_headers = (
                 {"Authorization": f"Bearer {token}"}
                 if token is not None
                 else {}
             )
+            if headers:
+                request_headers.update(headers)
+
             path = f"/api/v1/tenants/{TENANT_ID}/devices"
             if method.upper() == "PATCH":
-                path += f"/{device_id}/zone"
+                if endpoint == "device":
+                    path += f"/{device_id}"
+                else:
+                    path += f"/{device_id}/zone"
             return await client.request(
                 method,
                 path,
-                headers=headers,
+                headers=request_headers,
                 json=json,
+                content=content,
             )
 
     yield db, request
@@ -127,6 +141,10 @@ def test_allowed_tenant_roles_can_list_devices(
             "status": "active",
             "farm_id": str(FARM_ID),
             "zone_id": None,
+            "platform": None,
+            "protocol": None,
+            "vendor": None,
+            "capabilities": {},
             "last_seen_at": "2026-10-01T00:00:00Z",
             "created_at": "2026-10-01T00:00:00Z",
             "updated_at": "2026-10-01T00:00:00Z",
@@ -406,3 +424,311 @@ def test_patch_rejects_unexpected_payload_fields(device_client):
 
     assert response.status_code == 422
     db.execute.assert_not_called()
+
+
+def test_create_device_returns_created_resource(device_client):
+    db, request = device_client
+    db.execute.return_value.mappings.return_value.one.return_value = {
+        **DEVICE_ROW,
+        "device_code": "GW-NEW",
+        "device_type": "gateway",
+        "name": "New Gateway",
+        "status": "pending",
+        "farm_id": None,
+        "zone_id": None,
+    }
+
+    response = asyncio.run(
+        request(
+            method="POST",
+            json={
+                "device_code": "GW-NEW",
+                "device_type": "gateway",
+                "name": "New Gateway",
+                "farm_id": None,
+                "status": "pending",
+                "platform": "ESP32",
+                "protocol": "MQTT",
+                "vendor": "Espressif",
+                "capabilities": {
+                    "relays": 4,
+                    "sensors": ["temperature", "humidity"],
+                },
+            },
+        )
+    )
+
+    assert response.status_code == 201
+    assert response.json()["device_code"] == "GW-NEW"
+    assert response.json()["name"] == "New Gateway"
+    sql = str(db.execute.call_args.args[0])
+    params = db.execute.call_args.args[1]
+    assert "INSERT INTO devices" in sql
+    assert params["tenant_id"] == TENANT_ID
+    assert params["device_code"] == "GW-NEW"
+    assert params["farm_id"] is None
+    assert params["platform"] == "ESP32"
+    assert params["protocol"] == "MQTT"
+    assert params["vendor"] == "Espressif"
+    assert params["capabilities"] == (
+        '{"relays": 4, "sensors": ["temperature", "humidity"]}'
+    )
+    assert "CAST(:capabilities AS jsonb)" in sql
+
+
+def test_create_device_rejects_blank_fields(device_client):
+    db, request = device_client
+
+    response = asyncio.run(
+        request(
+            method="POST",
+            json={
+                "device_code": "   ",
+                "device_type": "gateway",
+                "name": "New Gateway",
+                "farm_id": None,
+                "status": "pending",
+            },
+        )
+    )
+
+    assert response.status_code == 422
+    db.execute.assert_not_called()
+
+
+def test_create_device_rejects_viewer_role(
+    device_client,
+    monkeypatch,
+):
+    db, request = device_client
+    monkeypatch.setattr(
+        dependencies,
+        "authorize_tenant",
+        Mock(side_effect=HTTPException(
+            status_code=403,
+            detail="Insufficient tenant permissions",
+        )),
+    )
+
+    response = asyncio.run(
+        request(
+            method="POST",
+            json={
+                "device_code": "GW-VIEWER",
+                "device_type": "gateway",
+                "name": "Viewer Device",
+                "farm_id": None,
+                "status": "pending",
+            },
+        )
+    )
+
+    assert response.status_code == 403
+    db.execute.assert_not_called()
+
+
+def test_update_device_changes_name_and_status(device_client):
+    db, request = device_client
+    updated = {
+        **DEVICE_ROW,
+        "name": "Updated Gateway",
+        "status": "disabled",
+    }
+    db.execute.return_value.mappings.return_value.first.return_value = updated
+
+    response = asyncio.run(
+        request(
+            method="PATCH",
+            endpoint="device",
+            json={"name": "Updated Gateway", "status": "disabled"},
+        )
+    )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "Updated Gateway"
+    assert response.json()["status"] == "disabled"
+    sql = str(db.execute.call_args.args[0])
+    params = db.execute.call_args.args[1]
+    assert "UPDATE devices" in sql
+    assert "WHERE tenant_id = :tenant_id AND id = :device_id" in sql
+    assert params["tenant_id"] == TENANT_ID
+    assert params["device_id"] == DEVICE_ID
+    assert params["name"] == "Updated Gateway"
+    assert params["status"] == "disabled"
+
+
+def test_update_device_changes_platform_and_capabilities(device_client):
+    db, request = device_client
+    updated = {
+        **DEVICE_ROW,
+        "platform": "ESP8266",
+        "protocol": "HTTP",
+        "vendor": "Espressif",
+        "capabilities": {"relays": 2},
+    }
+    db.execute.return_value.mappings.return_value.first.return_value = updated
+
+    response = asyncio.run(
+        request(
+            method="PATCH",
+            endpoint="device",
+            json={
+                "platform": " ESP8266 ",
+                "protocol": "HTTP",
+                "vendor": "Espressif",
+                "capabilities": {"relays": 2},
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response.json()["platform"] == "ESP8266"
+    assert response.json()["protocol"] == "HTTP"
+    assert response.json()["vendor"] == "Espressif"
+    assert response.json()["capabilities"] == {"relays": 2}
+
+    sql = str(db.execute.call_args.args[0])
+    params = db.execute.call_args.args[1]
+    assert "platform = :platform" in sql
+    assert "protocol = :protocol" in sql
+    assert "vendor = :vendor" in sql
+    assert "capabilities = CAST(:capabilities AS jsonb)" in sql
+    assert params["platform"] == "ESP8266"
+    assert params["capabilities"] == '{"relays": 2}'
+
+
+def test_update_device_can_clear_optional_metadata(device_client):
+    db, request = device_client
+    updated = {
+        **DEVICE_ROW,
+        "platform": None,
+        "protocol": None,
+        "vendor": None,
+    }
+    db.execute.return_value.mappings.return_value.first.return_value = updated
+
+    response = asyncio.run(
+        request(
+            method="PATCH",
+            endpoint="device",
+            json={
+                "platform": None,
+                "protocol": None,
+                "vendor": None,
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response.json()["platform"] is None
+    assert response.json()["protocol"] is None
+    assert response.json()["vendor"] is None
+
+    params = db.execute.call_args.args[1]
+    assert params["platform"] is None
+    assert params["protocol"] is None
+    assert params["vendor"] is None
+
+
+
+
+@pytest.mark.parametrize(
+    "invalid_value", [float("nan"), float("inf"), float("-inf")]
+)
+def test_create_device_rejects_non_finite_capabilities(
+    device_client, invalid_value
+):
+    import json
+
+    db, request = device_client
+    payload = {
+        "device_code": "DEVICE-NON-FINITE",
+        "device_type": "sensor",
+        "name": "Invalid JSON Device",
+        "capabilities": {"value": invalid_value},
+    }
+
+    response = asyncio.run(
+        request(
+            method="POST",
+            content=json.dumps(payload, allow_nan=True),
+            headers={"content-type": "application/json"},
+        )
+    )
+
+    assert response.status_code == 422
+    assert db.execute.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "invalid_value", [float("nan"), float("inf"), float("-inf")]
+)
+def test_update_device_rejects_non_finite_capabilities(
+    device_client, invalid_value
+):
+    import json
+
+    db, request = device_client
+    payload = {"capabilities": {"value": invalid_value}}
+
+    response = asyncio.run(
+        request(
+            method="PATCH",
+            endpoint="device",
+            content=json.dumps(payload, allow_nan=True),
+            headers={"content-type": "application/json"},
+        )
+    )
+
+    assert response.status_code == 422
+    assert db.execute.call_count == 0
+
+
+def test_update_device_rejects_null_capabilities(device_client):
+    db, request = device_client
+
+    response = asyncio.run(
+        request(
+            method="PATCH",
+            endpoint="device",
+            json={"capabilities": None},
+        )
+    )
+
+    assert response.status_code == 422
+    assert db.execute.call_count == 0
+
+
+@pytest.mark.parametrize("capabilities", [[], "invalid", 123])
+def test_device_rejects_non_object_capabilities(device_client, capabilities):
+    db, request = device_client
+
+    response = asyncio.run(
+        request(
+            method="POST",
+            json={
+                "device_code": "GW-INVALID",
+                "device_type": "gateway",
+                "name": "Invalid Gateway",
+                "capabilities": capabilities,
+            },
+        )
+    )
+
+    assert response.status_code == 422
+    db.execute.assert_not_called()
+
+
+def test_update_device_missing_resource_returns_404(device_client):
+    db, request = device_client
+    db.execute.return_value.mappings.return_value.first.return_value = None
+
+    response = asyncio.run(
+        request(
+            method="PATCH",
+            endpoint="device",
+            json={"name": "Missing Device"},
+        )
+    )
+
+    assert response.status_code == 404

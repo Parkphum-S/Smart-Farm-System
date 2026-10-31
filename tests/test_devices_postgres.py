@@ -37,7 +37,11 @@ def owner_engine():
             revision = conn.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            assert revision == "0008_device_zone_assignment"
+            assert revision in {
+                "0011_device_platform_integration",
+                "0012_sensor_registration",
+                "0013_zigbee_device_registrations",
+            }
         yield engine
     finally:
         engine.dispose()
@@ -440,3 +444,282 @@ def test_postgres_zone_fk_restricts_cross_farm_assignment(
                     "device_a": device_records["device_a"],
                 },
             )
+
+
+def test_postgres_create_device(http_client, device_records, owner_engine):
+    headers = login(http_client, device_records)
+    code = f"new-device-{uuid4().hex}"
+    response = http_client.post(
+        f"/api/v1/tenants/{device_records['tenant_a']}/devices",
+        headers=headers,
+        json={
+            "device_code": code,
+            "device_type": "gateway",
+            "name": "New Test Gateway",
+            "farm_id": str(device_records["farm_a"]),
+            "status": "pending",
+            "platform": "ESP32",
+            "protocol": "MQTT",
+            "vendor": "Espressif",
+            "capabilities": {
+                "relays": 4,
+                "sensors": ["temperature", "humidity"],
+            },
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    created = response.json()
+    assert created["device_code"] == code
+    assert created["name"] == "New Test Gateway"
+    assert created["farm_id"] == str(device_records["farm_a"])
+    assert created["zone_id"] is None
+    assert "device_token_hash" not in created
+    assert "credentials" not in created
+
+    try:
+        with owner_engine.connect() as conn:
+            stored = conn.execute(
+                text("""
+                    SELECT tenant_id, farm_id, device_code, device_type, name, status,
+                           platform, protocol, vendor, capabilities
+                    FROM devices WHERE id = :id
+                """),
+                {"id": created["id"]},
+            ).mappings().one()
+        assert str(stored["tenant_id"]) == str(device_records["tenant_a"])
+        assert str(stored["farm_id"]) == str(device_records["farm_a"])
+        assert stored["device_code"] == code
+        assert stored["device_type"] == "gateway"
+        assert stored["name"] == "New Test Gateway"
+        assert stored["status"] == "pending"
+        assert stored["platform"] == "ESP32"
+        assert stored["protocol"] == "MQTT"
+        assert stored["vendor"] == "Espressif"
+        assert stored["capabilities"] == {
+            "relays": 4,
+            "sensors": ["temperature", "humidity"],
+        }
+    finally:
+        with owner_engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM devices WHERE device_code = :code"),
+                {"code": code},
+            )
+
+
+def test_postgres_create_device_rejects_farm_from_other_tenant(
+    http_client, device_records
+):
+    headers = login(http_client, device_records)
+    response = http_client.post(
+        f"/api/v1/tenants/{device_records['tenant_a']}/devices",
+        headers=headers,
+        json={
+            "device_code": f"invalid-farm-{uuid4().hex}",
+            "device_type": "gateway",
+            "name": "Invalid Farm Device",
+            "farm_id": str(device_records["farm_b"]),
+            "status": "pending",
+        },
+    )
+    assert response.status_code == 409, response.text
+
+
+def test_postgres_update_device_name_and_status(
+    http_client, device_records, owner_engine
+):
+    headers = login(http_client, device_records)
+    response = http_client.patch(
+        f"/api/v1/tenants/{device_records['tenant_a']}/devices/"
+        f"{device_records['device_a']}",
+        headers=headers,
+        json={"name": "Updated Device Name", "status": "disabled"},
+    )
+
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["name"] == "Updated Device Name"
+    assert updated["status"] == "disabled"
+    assert updated["device_code"].startswith("device-")
+
+    with owner_engine.connect() as conn:
+        stored = conn.execute(
+            text("SELECT name, status FROM devices WHERE id = :id"),
+            {"id": device_records["device_a"]},
+        ).mappings().one()
+    assert stored["name"] == "Updated Device Name"
+    assert stored["status"] == "disabled"
+
+
+def test_postgres_update_device_platform_metadata(
+    http_client, device_records, owner_engine
+):
+    headers = login(http_client, device_records)
+    response = http_client.patch(
+        f"/api/v1/tenants/{device_records['tenant_a']}/devices/"
+        f"{device_records['device_a']}",
+        headers=headers,
+        json={
+            "platform": "ESP8266",
+            "protocol": "HTTP",
+            "vendor": "Espressif",
+            "capabilities": {"relays": 2, "sensors": ["temperature"]},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["platform"] == "ESP8266"
+    assert updated["protocol"] == "HTTP"
+    assert updated["vendor"] == "Espressif"
+    assert updated["capabilities"] == {
+        "relays": 2,
+        "sensors": ["temperature"],
+    }
+
+    with owner_engine.connect() as conn:
+        stored = conn.execute(
+            text("""
+                SELECT platform, protocol, vendor, capabilities
+                FROM devices WHERE id = :id
+            """),
+            {"id": device_records["device_a"]},
+        ).mappings().one()
+
+    assert stored["platform"] == "ESP8266"
+    assert stored["protocol"] == "HTTP"
+    assert stored["vendor"] == "Espressif"
+    assert stored["capabilities"] == {
+        "relays": 2,
+        "sensors": ["temperature"],
+    }
+
+
+def test_postgres_update_device_cannot_change_other_tenant_device(
+    http_client, device_records
+):
+    headers = login(http_client, device_records)
+    response = http_client.patch(
+        f"/api/v1/tenants/{device_records['tenant_a']}/devices/"
+        f"{device_records['device_b']}",
+        headers=headers,
+        json={"name": "Should Not Update"},
+    )
+    assert response.status_code in (403, 404)
+
+
+def test_postgres_changing_device_farm_to_null_clears_zone(
+    http_client, device_records, owner_engine
+):
+    headers = login(http_client, device_records)
+    base_url = (
+        f"/api/v1/tenants/{device_records['tenant_a']}/devices/"
+        f"{device_records['device_a']}"
+    )
+
+    assigned = http_client.patch(
+        f"{base_url}/zone",
+        headers=headers,
+        json={"zone_id": str(device_records["zone_a"])},
+    )
+    assert assigned.status_code == 200, assigned.text
+    assert assigned.json()["zone_id"] == str(device_records["zone_a"])
+
+    response = http_client.patch(
+        base_url,
+        headers=headers,
+        json={"farm_id": None},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["farm_id"] is None
+    assert response.json()["zone_id"] is None
+
+    with owner_engine.connect() as conn:
+        stored = conn.execute(
+            text("SELECT farm_id, zone_id FROM devices WHERE id = :id"),
+            {"id": device_records["device_a"]},
+        ).mappings().one()
+
+    assert stored["farm_id"] is None
+    assert stored["zone_id"] is None
+
+
+def test_postgres_updating_device_with_same_farm_preserves_zone(
+    http_client, device_records, owner_engine
+):
+    headers = login(http_client, device_records)
+    base_url = (
+        f"/api/v1/tenants/{device_records['tenant_a']}/devices/"
+        f"{device_records['device_a']}"
+    )
+
+    assigned = http_client.patch(
+        f"{base_url}/zone",
+        headers=headers,
+        json={"zone_id": str(device_records["zone_a"])},
+    )
+    assert assigned.status_code == 200, assigned.text
+
+    response = http_client.patch(
+        base_url,
+        headers=headers,
+        json={"farm_id": str(device_records["farm_a"])},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["farm_id"] == str(device_records["farm_a"])
+    assert response.json()["zone_id"] == str(device_records["zone_a"])
+
+    with owner_engine.connect() as conn:
+        stored = conn.execute(
+            text("SELECT farm_id, zone_id FROM devices WHERE id = :id"),
+            {"id": device_records["device_a"]},
+        ).mappings().one()
+
+    assert stored["farm_id"] == device_records["farm_a"]
+    assert stored["zone_id"] == device_records["zone_a"]
+
+
+def test_postgres_update_device_rejects_farm_from_other_tenant(
+    http_client, device_records, owner_engine
+):
+    headers = login(http_client, device_records)
+    url = (
+        f"/api/v1/tenants/{device_records['tenant_a']}/devices/"
+        f"{device_records['device_a']}"
+    )
+
+    response = http_client.patch(
+        url,
+        headers=headers,
+        json={"farm_id": str(device_records["farm_b"])},
+    )
+
+    assert response.status_code == 409, response.text
+
+    with owner_engine.connect() as conn:
+        stored = conn.execute(
+            text("SELECT farm_id, zone_id FROM devices WHERE id = :id"),
+            {"id": device_records["device_a"]},
+        ).mappings().one()
+
+    assert stored["farm_id"] == device_records["farm_a"]
+    assert stored["zone_id"] is None
+
+
+def test_postgres_update_missing_device_returns_404(
+    http_client, device_records
+):
+    headers = login(http_client, device_records)
+    missing_device_id = uuid4()
+
+    response = http_client.patch(
+        f"/api/v1/tenants/{device_records['tenant_a']}/devices/"
+        f"{missing_device_id}",
+        headers=headers,
+        json={"name": "Missing Device"},
+    )
+
+    assert response.status_code == 404, response.text
