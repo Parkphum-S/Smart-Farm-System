@@ -435,3 +435,249 @@ def test_postgres_delete_farm_referenced_by_zone_returns_409(
                     text("DELETE FROM farms WHERE id = :farm_id"),
                     {"farm_id": created_id},
                 )
+
+
+def test_postgres_uploads_and_reads_farm_image(http_client, farm_records):
+    headers = login(http_client, farm_records)
+    tenant_id = farm_records["tenant_a"]
+    farm_id = farm_records["farm_a"]
+    image_bytes = b"\x89PNG\r\n\x1a\n" + b"smartfarm-test-image"
+
+    upload = http_client.post(
+        f"/api/v1/tenants/{tenant_id}/farms/{farm_id}/image",
+        headers=headers,
+        files={"image": ("farm.png", image_bytes, "image/png")},
+    )
+    assert upload.status_code == 204, upload.text
+
+    response = http_client.get(
+        f"/api/v1/tenants/{tenant_id}/farms/{farm_id}/image",
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.content == image_bytes
+    assert response.headers["content-type"].startswith("image/png")
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_postgres_farm_without_image_returns_404(http_client, farm_records):
+    headers = login(http_client, farm_records)
+
+    response = http_client.get(
+        f"/api/v1/tenants/{farm_records['tenant_a']}/farms/"
+        f"{farm_records['farm_a']}/image",
+        headers=headers,
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Farm image not found"
+
+
+def test_postgres_rejects_empty_farm_image(http_client, farm_records):
+    headers = login(http_client, farm_records)
+
+    response = http_client.post(
+        f"/api/v1/tenants/{farm_records['tenant_a']}/farms/"
+        f"{farm_records['farm_a']}/image",
+        headers=headers,
+        files={"image": ("empty.png", b"", "image/png")},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Image file is empty"
+
+
+def test_postgres_rejects_farm_image_with_fake_png_signature(
+    http_client, farm_records
+):
+    headers = login(http_client, farm_records)
+
+    response = http_client.post(
+        f"/api/v1/tenants/{farm_records['tenant_a']}/farms/"
+        f"{farm_records['farm_a']}/image",
+        headers=headers,
+        files={"image": ("farm.png", b"not-a-real-png", "image/png")},
+    )
+
+    assert response.status_code == 415
+
+
+def test_postgres_rejects_unsupported_farm_image(http_client, farm_records):
+    headers = login(http_client, farm_records)
+
+    response = http_client.post(
+        f"/api/v1/tenants/{farm_records['tenant_a']}/farms/"
+        f"{farm_records['farm_a']}/image",
+        headers=headers,
+        files={"image": ("farm.gif", b"GIF89a-invalid", "image/gif")},
+    )
+    assert response.status_code == 415
+
+
+def test_postgres_rejects_farm_image_over_5_mib(http_client, farm_records):
+    headers = login(http_client, farm_records)
+
+    response = http_client.post(
+        f"/api/v1/tenants/{farm_records['tenant_a']}/farms/"
+        f"{farm_records['farm_a']}/image",
+        headers=headers,
+        files={
+            "image": (
+                "farm.png",
+                b"\x89PNG\r\n\x1a\n" + b"x" * (5 * 1024 * 1024),
+                "image/png",
+            )
+        },
+    )
+    assert response.status_code == 413
+
+
+def test_postgres_cannot_upload_image_to_another_tenant(
+    http_client, farm_records
+):
+    headers = login(http_client, farm_records)
+
+    response = http_client.post(
+        f"/api/v1/tenants/{farm_records['tenant_b']}/farms/"
+        f"{farm_records['farm_b']}/image",
+        headers=headers,
+        files={
+            "image": (
+                "farm.png",
+                b"\x89PNG\r\n\x1a\n" + b"smartfarm-test-image",
+                "image/png",
+            )
+        },
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Insufficient tenant permissions"
+
+
+def test_postgres_runtime_farm_privileges(app_engine):
+    with app_engine.connect() as conn:
+        identity = conn.execute(
+            text("""
+                SELECT current_database(), current_user,
+                       rolsuper, rolcreatedb, rolcreaterole
+                FROM pg_roles
+                WHERE rolname = current_user
+            """)
+        ).one()
+
+        table_privileges = conn.execute(
+            text("""
+                SELECT
+                    has_table_privilege(current_user, 'farms', 'SELECT'),
+                    has_table_privilege(current_user, 'farms', 'INSERT'),
+                    has_table_privilege(current_user, 'farms', 'DELETE')
+            """)
+        ).one()
+
+        update_privileges = conn.execute(
+            text("""
+                SELECT
+                    has_column_privilege(
+                        current_user, 'farms', 'name', 'UPDATE'
+                    ),
+                    has_column_privilege(
+                        current_user, 'farms', 'timezone', 'UPDATE'
+                    ),
+                    has_column_privilege(
+                        current_user, 'farms', 'updated_at', 'UPDATE'
+                    ),
+                    has_column_privilege(
+                        current_user, 'farms', 'tenant_id', 'UPDATE'
+                    ),
+                    has_column_privilege(
+                        current_user, 'farms', 'id', 'UPDATE'
+                    ),
+                    has_column_privilege(
+                        current_user, 'farms', 'image_content', 'UPDATE'
+                    ),
+                    has_column_privilege(
+                        current_user, 'farms', 'image_content_type', 'UPDATE'
+                    )
+            """)
+        ).one()
+
+    assert identity == (
+        "smartfarm_test",
+        "smartfarm_app",
+        False,
+        False,
+        False,
+    )
+    assert tuple(table_privileges) == (True, True, True)
+    assert tuple(update_privileges) == (
+        True, True, True, False, False, True, True
+    )
+
+
+def test_postgres_blocks_cross_tenant_farm_resource_access(
+    http_client, farm_records
+):
+    records = farm_records
+    headers = login(http_client, records)
+
+    foreign_farm_id = records["farm_b"]
+    tenant_a_path = (
+        f"/api/v1/tenants/{records['tenant_a']}/farms/{foreign_farm_id}"
+    )
+    tenant_b_image_path = (
+        f"/api/v1/tenants/{records['tenant_b']}/farms/"
+        f"{foreign_farm_id}/image"
+    )
+
+    with records["owner_engine"].connect() as conn:
+        before = conn.execute(
+            text("""
+                SELECT tenant_id, name, timezone
+                FROM farms
+                WHERE id = :farm_id
+            """),
+            {"farm_id": foreign_farm_id},
+        ).one()
+
+    # Tenant A cannot read Tenant B's farm image through Tenant A's path.
+    response = http_client.get(
+        f"{tenant_a_path}/image",
+        headers=headers,
+    )
+    assert response.status_code == 404, response.text
+
+    # Tenant A cannot update Tenant B's farm by supplying its ID.
+    response = http_client.request(
+        "PATCH",
+        tenant_a_path,
+        headers=headers,
+        json={"name": "Cross Tenant Modified"},
+    )
+    assert response.status_code == 404, response.text
+
+    # Tenant A cannot delete Tenant B's farm by supplying its ID.
+    response = http_client.request(
+        "DELETE",
+        tenant_a_path,
+        headers=headers,
+    )
+    assert response.status_code == 404, response.text
+
+    # Direct use of Tenant B's path must fail membership authorization.
+    response = http_client.get(
+        tenant_b_image_path,
+        headers=headers,
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == "Insufficient tenant permissions"
+
+    with records["owner_engine"].connect() as conn:
+        after = conn.execute(
+            text("""
+                SELECT tenant_id, name, timezone
+                FROM farms
+                WHERE id = :farm_id
+            """),
+            {"farm_id": foreign_farm_id},
+        ).one()
+
+    assert after == before
