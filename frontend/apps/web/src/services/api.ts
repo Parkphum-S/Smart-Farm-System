@@ -113,6 +113,8 @@ export interface Farm {
   id: string;
   name: string;
   timezone: string;
+  latitude: number | null;
+  longitude: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -120,9 +122,32 @@ export interface Farm {
 export interface FarmCreate {
   name: string;
   timezone: string;
+  latitude: number | null;
+  longitude: number | null;
 }
 
 export type FarmUpdate = Partial<FarmCreate>;
+
+export interface FarmWeather {
+  temperature: number;
+  feels_like: number;
+  humidity: number;
+  pressure: number;
+  wind_speed: number;
+  wind_deg: number | null;
+  description: string;
+  icon: string;
+  observed_at: string;
+  source: string;
+}
+
+export interface FarmAirPollution {
+  pm2_5: number;
+  aqi: number;
+  aqi_label: string;
+  observed_at: string;
+  source: string;
+}
 
 export const farmApi = {
   list(tenantId: string): Promise<Farm[]> {
@@ -151,8 +176,107 @@ export const farmApi = {
       { method: "DELETE" },
     );
   },
+
+  async uploadImage(
+    tenantId: string,
+    farmId: string,
+    file: File,
+  ): Promise<void> {
+    const form = new FormData();
+    form.append("image", file);
+
+    const token = session.getToken();
+    const headers = new Headers({ Accept: "application/json" });
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+
+    let response: Response;
+    try {
+      response = await fetch(
+        `${API_BASE_URL}/api/v1/tenants/${encodeURIComponent(tenantId)}/farms/${encodeURIComponent(farmId)}/image`,
+        { method: "POST", headers, body: form },
+      );
+    } catch {
+      throw new ApiError(
+        "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาตรวจสอบการเชื่อมต่อ API",
+        0,
+      );
+    }
+
+    if (response.status === 401) {
+      session.clear();
+      window.dispatchEvent(new Event("smartfarm:unauthorized"));
+    }
+    if (!response.ok) {
+      let message = `เกิดข้อผิดพลาดจากเซิร์ฟเวอร์ (${response.status})`;
+      try {
+        const body: unknown = await response.json();
+        if (typeof body === "object" && body !== null && "detail" in body) {
+          const detail = (body as { detail?: unknown }).detail;
+          if (typeof detail === "string") message = detail;
+        }
+      } catch {
+        // ใช้ข้อความมาตรฐานเมื่อ response ไม่มี JSON
+      }
+      throw new ApiError(message, response.status);
+    }
+  },
+
+  async getImage(tenantId: string, farmId: string): Promise<Blob> {
+    const token = session.getToken();
+    const headers = new Headers();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+
+    let response: Response;
+    try {
+      response = await fetch(
+        `${API_BASE_URL}/api/v1/tenants/${encodeURIComponent(tenantId)}/farms/${encodeURIComponent(farmId)}/image`,
+        { method: "GET", headers, cache: "no-store" },
+      );
+    } catch {
+      throw new ApiError(
+        "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาตรวจสอบการเชื่อมต่อ API",
+        0,
+      );
+    }
+
+    if (response.status === 401) {
+      session.clear();
+      window.dispatchEvent(new Event("smartfarm:unauthorized"));
+    }
+    if (!response.ok) {
+      let message = `เกิดข้อผิดพลาดจากเซิร์ฟเวอร์ (${response.status})`;
+      try {
+        const body: unknown = await response.json();
+        if (typeof body === "object" && body !== null && "detail" in body) {
+          const detail = (body as { detail?: unknown }).detail;
+          if (typeof detail === "string") message = detail;
+        }
+      } catch {
+        // ใช้ข้อความมาตรฐานเมื่อ response ไม่มี JSON
+      }
+      throw new ApiError(message, response.status);
+    }
+    return response.blob();
+  },
 };
 
+
+export const weatherApi = {
+  get(tenantId: string, farmId: string): Promise<FarmWeather> {
+    return request<FarmWeather>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/farms/${encodeURIComponent(farmId)}/weather`,
+    );
+  },
+};
+
+
+export const airPollutionApi = {
+  get(tenantId: string, farmId: string): Promise<FarmAirPollution> {
+    return request<FarmAirPollution>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/farms/${encodeURIComponent(farmId)}/air-pollution`,
+    );
+  },
+};
 
 
 export type ZoneType =
@@ -255,6 +379,38 @@ export const deviceApi = {
     );
   },
 
+  create(
+    tenantId: string,
+    data: {
+      device_code?: string;
+      device_type: string;
+      name: string;
+      farm_id: string | null;
+      status?: "pending" | "active" | "disabled" | "revoked";
+    },
+  ): Promise<Device> {
+    return request<Device>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/devices`,
+      { method: "POST", body: JSON.stringify(data) },
+    );
+  },
+
+  update(
+    tenantId: string,
+    deviceId: string,
+    data: {
+      device_type?: string;
+      name?: string;
+      farm_id?: string | null;
+      status?: "pending" | "active" | "disabled" | "revoked";
+    },
+  ): Promise<Device> {
+    return request<Device>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/devices/${encodeURIComponent(deviceId)}`,
+      { method: "PATCH", body: JSON.stringify(data) },
+    );
+  },
+
   assignZone(
     tenantId: string,
     deviceId: string,
@@ -266,6 +422,47 @@ export const deviceApi = {
         method: "PATCH",
         body: JSON.stringify({ zone_id: zoneId }),
       },
+    );
+  },
+};
+
+
+export type SensorStatus = "active" | "disabled" | "retired";
+
+export interface Sensor {
+  id: string;
+  tenant_id: string;
+  device_id: string;
+  sensor_code: string;
+  measurement_type: string;
+  unit: string;
+  status: SensorStatus;
+  created_at: string;
+}
+
+export const sensorApi = {
+  list(tenantId: string, deviceId: string): Promise<Sensor[]> {
+    return request<Sensor[]>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/devices/${encodeURIComponent(deviceId)}/sensors`,
+    );
+  },
+  create(tenantId: string, deviceId: string, data: {
+    measurement_type: string;
+    unit: string;
+  }): Promise<Sensor> {
+    return request<Sensor>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/devices/${encodeURIComponent(deviceId)}/sensors`,
+      { method: "POST", body: JSON.stringify(data) },
+    );
+  },
+  update(tenantId: string, deviceId: string, sensorId: string, data: {
+    measurement_type?: string;
+    unit?: string;
+    status?: SensorStatus;
+  }): Promise<Sensor> {
+    return request<Sensor>(
+      `/api/v1/tenants/${encodeURIComponent(tenantId)}/devices/${encodeURIComponent(deviceId)}/sensors/${encodeURIComponent(sensorId)}`,
+      { method: "PATCH", body: JSON.stringify(data) },
     );
   },
 };
@@ -287,7 +484,14 @@ export interface TelemetryReading {
 export const telemetryApi = {
   list(
     tenantId: string,
-    params: { latest_only?: boolean; limit?: number } = {},
+    params: {
+      latest_only?: boolean;
+      limit?: number;
+      metric?: string;
+      sensor_id?: string;
+      since?: string;
+      until?: string;
+    } = {},
   ): Promise<TelemetryReading[]> {
     const query = new URLSearchParams();
     if (params.latest_only !== undefined) {
@@ -295,6 +499,18 @@ export const telemetryApi = {
     }
     if (params.limit !== undefined) {
       query.set("limit", String(params.limit));
+    }
+    if (params.metric !== undefined) {
+      query.set("metric", params.metric);
+    }
+    if (params.sensor_id !== undefined) {
+      query.set("sensor_id", params.sensor_id);
+    }
+    if (params.since !== undefined) {
+      query.set("since", params.since);
+    }
+    if (params.until !== undefined) {
+      query.set("until", params.until);
     }
 
     const suffix = query.toString();

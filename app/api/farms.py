@@ -58,7 +58,7 @@ def list_farms(
                 db.execute(
                     text(
                         """
-                        SELECT id, name, timezone, created_at, updated_at
+                        SELECT id, name, timezone, latitude, longitude, created_at, updated_at
                         FROM farms
                         WHERE tenant_id = :tenant_id
                         ORDER BY name, id
@@ -95,9 +95,9 @@ def create_farm(
                 db.execute(
                     text(
                         """
-                        INSERT INTO farms (id, tenant_id, name, timezone)
-                        VALUES (:id, :tenant_id, :name, :timezone)
-                        RETURNING id, name, timezone, created_at, updated_at
+                        INSERT INTO farms (id, tenant_id, name, timezone, latitude, longitude)
+                        VALUES (:id, :tenant_id, :name, :timezone, :latitude, :longitude)
+                        RETURNING id, name, timezone, latitude, longitude, created_at, updated_at
                         """
                     ),
                     {
@@ -105,6 +105,8 @@ def create_farm(
                         "tenant_id": tenant_id,
                         "name": payload.name,
                         "timezone": payload.timezone,
+                        "latitude": payload.latitude,
+                        "longitude": payload.longitude,
                     },
                 )
                 .mappings()
@@ -135,7 +137,10 @@ def update_farm(
     changes = payload.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(status_code=422, detail="No fields to update")
-    if any(value is None for value in changes.values()):
+    if any(
+        value is None for key, value in changes.items()
+        if key not in {"latitude", "longitude"}
+    ):
         raise HTTPException(status_code=422, detail="Invalid update value")
 
     assignments = ", ".join(f"{key} = :{key}" for key in changes)
@@ -148,7 +153,7 @@ def update_farm(
                         UPDATE farms
                         SET {assignments}, updated_at = now()
                         WHERE tenant_id = :tenant_id AND id = :farm_id
-                        RETURNING id, name, timezone, created_at, updated_at
+                        RETURNING id, name, timezone, latitude, longitude, created_at, updated_at
                         """
                     ),
                     {

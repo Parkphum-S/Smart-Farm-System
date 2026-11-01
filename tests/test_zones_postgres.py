@@ -354,3 +354,88 @@ def test_postgres_runtime_zone_privileges(app_engine):
     assert tuple(update_privileges) == (
         True, True, True, False, False, False, True
     )
+
+
+def test_postgres_blocks_cross_tenant_zone_resource_access(
+    http_client, zone_records
+):
+    records = zone_records
+    headers = login(http_client, records)
+
+    foreign_zone_id = uuid4()
+
+    # Create a real Zone owned by Tenant B using the owner connection.
+    with records["owner_engine"].begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO zones (id, tenant_id, farm_id, name)
+                VALUES (:id, :tenant_id, :farm_id, :name)
+            """),
+            {
+                "id": foreign_zone_id,
+                "tenant_id": records["tenant_b"],
+                "farm_id": records["farm_b"],
+                "name": "Tenant B Protected Zone",
+            },
+        )
+
+    tenant_a_path = (
+        f"/api/v1/tenants/{records['tenant_a']}/farms/"
+        f"{records['farm_a']}/zones/{foreign_zone_id}"
+    )
+    tenant_b_path = (
+        f"/api/v1/tenants/{records['tenant_b']}/farms/"
+        f"{records['farm_b']}/zones/{foreign_zone_id}"
+    )
+
+    with records["owner_engine"].connect() as conn:
+        before = conn.execute(
+            text("""
+                SELECT tenant_id, farm_id, name, status
+                FROM zones
+                WHERE id = :zone_id
+            """),
+            {"zone_id": foreign_zone_id},
+        ).one()
+
+    # Tenant A cannot read Tenant B's Zone through Tenant A's path.
+    response = http_client.get(
+        tenant_a_path,
+        headers=headers,
+    )
+    assert response.status_code == 404, response.text
+
+    # Tenant A cannot update Tenant B's Zone by supplying its ID.
+    response = http_client.patch(
+        tenant_a_path,
+        headers=headers,
+        json={"name": "Cross Tenant Modified"},
+    )
+    assert response.status_code == 404, response.text
+
+    # Tenant A cannot delete Tenant B's Zone by supplying its ID.
+    response = http_client.delete(
+        tenant_a_path,
+        headers=headers,
+    )
+    assert response.status_code == 404, response.text
+
+    # Direct use of Tenant B's path must fail membership authorization.
+    response = http_client.get(
+        tenant_b_path,
+        headers=headers,
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == "Insufficient tenant permissions"
+
+    with records["owner_engine"].connect() as conn:
+        after = conn.execute(
+            text("""
+                SELECT tenant_id, farm_id, name, status
+                FROM zones
+                WHERE id = :zone_id
+            """),
+            {"zone_id": foreign_zone_id},
+        ).one()
+
+    assert after == before

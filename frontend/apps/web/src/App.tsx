@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ApiError, authApi, commandApi, deviceApi, farmApi, telemetryApi, zoneApi } from "./services/api";
-import type { Farm, TenantAccess } from "./services/api";
+import { ApiError, airPollutionApi, authApi, commandApi, deviceApi, farmApi, sensorApi, telemetryApi, weatherApi, zoneApi } from "./services/api";
+import type { Farm, FarmAirPollution, FarmWeather, TenantAccess } from "./services/api";
 import type { DeviceCommand } from "./services/api";
-import type { Device, TelemetryReading } from "./services/api";
+import type { Device, Sensor, SensorStatus, TelemetryReading } from "./services/api";
 import type { Zone, ZoneType, ZoneCategoryDetails } from "./services/api";
 import { zoneTypeLabels } from "./services/api";
 
@@ -103,10 +103,104 @@ const pageTitles: Record<string, { title: string; description: string }> = {
   },
 };
 
+type SensorMeasurementOption = {
+  value: string;
+  label: string;
+  units: string[];
+  defaultUnit: string;
+};
+
+type SensorMeasurementGroup = {
+  label: string;
+  options: SensorMeasurementOption[];
+};
+
+const SENSOR_MEASUREMENT_GROUPS: SensorMeasurementGroup[] = [
+  {
+    label: "สภาพอากาศและบรรยากาศ",
+    options: [
+      { value: "temperature", label: "อุณหภูมิ", units: ["celsius", "fahrenheit", "kelvin"], defaultUnit: "celsius" },
+      { value: "humidity", label: "ความชื้นสัมพัทธ์", units: ["percent"], defaultUnit: "percent" },
+      { value: "pressure", label: "ความดันอากาศ", units: ["hPa", "kPa", "Pa", "bar", "psi"], defaultUnit: "hPa" },
+      { value: "altitude", label: "ระดับความสูง", units: ["m", "cm", "ft"], defaultUnit: "m" },
+    ],
+  },
+  {
+    label: "แสงและรังสี",
+    options: [
+      { value: "illuminance", label: "ความเข้มแสง", units: ["lux"], defaultUnit: "lux" },
+      { value: "solar_irradiance", label: "ความเข้มรังสีแสงอาทิตย์", units: ["W/m2", "kW/m2"], defaultUnit: "W/m2" },
+      { value: "par", label: "รังสี PAR สำหรับพืช", units: ["umol/m2/s", "mol/m2/day"], defaultUnit: "umol/m2/s" },
+      { value: "uv_index", label: "ดัชนีรังสี UV", units: ["index"], defaultUnit: "index" },
+    ],
+  },
+  {
+    label: "คุณภาพอากาศ",
+    options: [
+      { value: "co2", label: "คาร์บอนไดออกไซด์ (CO2)", units: ["ppm"], defaultUnit: "ppm" },
+      { value: "voc", label: "สารอินทรีย์ระเหยง่าย (VOC)", units: ["ppb", "ppm"], defaultUnit: "ppb" },
+      { value: "pm25", label: "ฝุ่นละออง PM2.5", units: ["ug/m3"], defaultUnit: "ug/m3" },
+      { value: "pm10", label: "ฝุ่นละออง PM10", units: ["ug/m3"], defaultUnit: "ug/m3" },
+      { value: "air_quality_index", label: "ดัชนีคุณภาพอากาศ (AQI)", units: ["index"], defaultUnit: "index" },
+    ],
+  },
+  {
+    label: "ดินและคุณภาพน้ำ",
+    options: [
+      { value: "soil_moisture", label: "ความชื้นในดิน", units: ["percent", "m3/m3"], defaultUnit: "percent" },
+      { value: "soil_temperature", label: "อุณหภูมิดิน", units: ["celsius", "fahrenheit"], defaultUnit: "celsius" },
+      { value: "ph", label: "ค่าความเป็นกรด-ด่าง (pH)", units: ["pH"], defaultUnit: "pH" },
+      { value: "ec", label: "ค่าการนำไฟฟ้า (EC)", units: ["uS/cm", "mS/cm"], defaultUnit: "uS/cm" },
+      { value: "tds", label: "สารละลายทั้งหมด (TDS)", units: ["ppm", "mg/L"], defaultUnit: "ppm" },
+      { value: "salinity", label: "ความเค็ม", units: ["ppt", "PSU", "g/L"], defaultUnit: "ppt" },
+      { value: "dissolved_oxygen", label: "ออกซิเจนละลายในน้ำ (DO)", units: ["mg/L", "percent"], defaultUnit: "mg/L" },
+      { value: "water_temperature", label: "อุณหภูมิน้ำ", units: ["celsius", "fahrenheit"], defaultUnit: "celsius" },
+    ],
+  },
+  {
+    label: "อุตุนิยมวิทยา",
+    options: [
+      { value: "rainfall", label: "ปริมาณน้ำฝน", units: ["mm", "mm/h"], defaultUnit: "mm" },
+      { value: "wind_speed", label: "ความเร็วลม", units: ["m/s", "km/h"], defaultUnit: "m/s" },
+      { value: "wind_direction", label: "ทิศทางลม", units: ["degree"], defaultUnit: "degree" },
+      { value: "leaf_wetness", label: "ความเปียกชื้นของใบ", units: ["percent"], defaultUnit: "percent" },
+    ],
+  },
+  {
+    label: "ระบบน้ำและชลประทาน",
+    options: [
+      { value: "water_level", label: "ระดับน้ำ", units: ["mm", "cm", "m", "percent"], defaultUnit: "cm" },
+      { value: "flow_rate", label: "อัตราการไหล", units: ["L/min", "L/h", "m3/h"], defaultUnit: "L/min" },
+    ],
+  },
+  {
+    label: "ไฟฟ้าและพลังงาน",
+    options: [
+      { value: "voltage", label: "แรงดันไฟฟ้า", units: ["V", "mV"], defaultUnit: "V" },
+      { value: "current", label: "กระแสไฟฟ้า", units: ["A", "mA"], defaultUnit: "A" },
+      { value: "power", label: "กำลังไฟฟ้า", units: ["W", "kW"], defaultUnit: "W" },
+      { value: "energy", label: "พลังงานไฟฟ้า", units: ["Wh", "kWh"], defaultUnit: "Wh" },
+      { value: "frequency", label: "ความถี่", units: ["Hz", "kHz"], defaultUnit: "Hz" },
+      { value: "battery_level", label: "ระดับแบตเตอรี่", units: ["percent"], defaultUnit: "percent" },
+    ],
+  },
+  {
+    label: "ระยะทางและการตรวจจับ",
+    options: [
+      { value: "distance", label: "ระยะทาง", units: ["mm", "cm", "m"], defaultUnit: "cm" },
+      { value: "vibration", label: "การสั่นสะเทือน", units: ["m/s2", "mm/s"], defaultUnit: "m/s2" },
+      { value: "sound_level", label: "ระดับเสียง", units: ["dB"], defaultUnit: "dB" },
+      { value: "motion", label: "การตรวจจับการเคลื่อนไหว", units: ["boolean"], defaultUnit: "boolean" },
+    ],
+  },
+];
+
+const SENSOR_MEASUREMENT_OPTIONS = SENSOR_MEASUREMENT_GROUPS.flatMap(
+  (group) => group.options,
+);
+
 const metrics = [
-  { label: "โซนทั้งหมด", icon: "▦", unit: "โซน" },
-  { label: "อุปกรณ์ออนไลน์", icon: "▣", unit: "อุปกรณ์" },
-  { label: "Gateway ออนไลน์", icon: "⌁", unit: "Gateway" },
+  { label: "Gateway ทั้งหมด", icon: "⌁", unit: "Gateway" },
   { label: "การแจ้งเตือนค้าง", icon: "♧", unit: "รายการ" },
 ];
 
@@ -139,6 +233,20 @@ function isTenantUuid(value: string): boolean {
   );
 }
 
+function isDeviceRecentlyOnline(
+  device: Device,
+  now = Date.now(),
+): boolean {
+  if (device.status !== "active" || !device.last_seen_at) {
+    return false;
+  }
+
+  const lastSeen = Date.parse(device.last_seen_at);
+  const age = now - lastSeen;
+
+  return Number.isFinite(lastSeen) && age >= 0 && age <= 5 * 60 * 1000;
+}
+
 function formatTenantDisplayId(tenantId: string): string {
   if (!isTenantUuid(tenantId)) {
     return "ไม่มี Tenant UUID ที่ถูกต้อง";
@@ -157,6 +265,9 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [selectedRange, setSelectedRange] = useState("24 ชั่วโมง");
   const [selectedVariable, setSelectedVariable] = useState("อุณหภูมิ");
+  const [selectedDashboardFarmId, setSelectedDashboardFarmId] = useState("");
+  const [selectedDashboardZoneId, setSelectedDashboardZoneId] = useState("all");
+  const [selectedDashboardStatusZoneId, setSelectedDashboardStatusZoneId] = useState("all");
   const [zoneSearch, setZoneSearch] = useState("");
 
   const [zones, setZones] = useState<Zone[]>([]);
@@ -204,9 +315,7 @@ export default function App() {
   const [tenantListLoading, setTenantListLoading] = useState(true);
   const [tenantListError, setTenantListError] = useState("");
 
-  const [farms, setFarms] = useState<
-    { id: string; name: string; timezone: string; created_at: string; updated_at: string }[]
-  >([]);
+  const [farms, setFarms] = useState<Farm[]>([]);
   const [farmsLoading, setFarmsLoading] = useState(false);
   const [farmsError, setFarmsError] = useState("");
   const [farmsRequested, setFarmsRequested] = useState(false);
@@ -214,14 +323,44 @@ export default function App() {
   const [farmFormMode, setFarmFormMode] = useState<"create" | "edit" | null>(null);
   const [farmName, setFarmName] = useState("");
   const [farmTimezone, setFarmTimezone] = useState("Asia/Bangkok");
+  const [farmLatitude, setFarmLatitude] = useState("");
+  const [farmLongitude, setFarmLongitude] = useState("");
   const [farmSaving, setFarmSaving] = useState(false);
   const [farmActionError, setFarmActionError] = useState("");
   const [farmActionMessage, setFarmActionMessage] = useState("");
+  const [farmImageUrls, setFarmImageUrls] = useState<Record<string, string>>({});
+  const [farmImageReloadKey, setFarmImageReloadKey] = useState(0);
+  const [farmImageBusy, setFarmImageBusy] = useState(false);
+  const [farmImageError, setFarmImageError] = useState("");
   const [devices, setDevices] = useState<Device[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [devicesError, setDevicesError] = useState("");
   const [devicesRequested, setDevicesRequested] = useState(false);
   const [devicesReloadKey, setDevicesReloadKey] = useState(0);
+
+  const [sensors, setSensors] = useState<Sensor[]>([]);
+  const [sensorDevices, setSensorDevices] = useState<Device[]>([]);
+  const [sensorsLoading, setSensorsLoading] = useState(false);
+  const [sensorsError, setSensorsError] = useState("");
+  const [sensorReloadKey, setSensorReloadKey] = useState(0);
+  const [selectedSensorDeviceId, setSelectedSensorDeviceId] = useState("");
+  const [sensorFormMode, setSensorFormMode] = useState<"create" | "edit" | null>(null);
+  const [sensorEditing, setSensorEditing] = useState<Sensor | null>(null);
+  const [sensorFormDeviceId, setSensorFormDeviceId] = useState("");
+  const [sensorFormType, setSensorFormType] = useState("");
+  const [sensorFormUnit, setSensorFormUnit] = useState("");
+  const [sensorFormStatus, setSensorFormStatus] = useState<SensorStatus>("active");
+  const [sensorSaving, setSensorSaving] = useState(false);
+  const [sensorFormError, setSensorFormError] = useState("");
+  const [deviceFormMode, setDeviceFormMode] = useState<"create" | "edit" | null>(null);
+  const [deviceEditing, setDeviceEditing] = useState<Device | null>(null);
+  const [deviceFormCode, setDeviceFormCode] = useState("");
+  const [deviceFormType, setDeviceFormType] = useState("");
+  const [deviceFormName, setDeviceFormName] = useState("");
+  const [deviceFormFarmId, setDeviceFormFarmId] = useState("");
+  const [deviceFormStatus, setDeviceFormStatus] = useState<"pending" | "active" | "disabled" | "revoked">("pending");
+  const [deviceFormSaving, setDeviceFormSaving] = useState(false);
+  const [deviceFormError, setDeviceFormError] = useState("");
   const [deviceZonesByFarm, setDeviceZonesByFarm] = useState<Record<string, Zone[]>>({});
   const [deviceZoneLoading, setDeviceZoneLoading] = useState<Record<string, boolean>>({});
   const [deviceZoneLoadErrors, setDeviceZoneLoadErrors] = useState<Record<string, string>>({});
@@ -234,6 +373,23 @@ export default function App() {
   const [telemetryError, setTelemetryError] = useState("");
   const [telemetryRequested, setTelemetryRequested] = useState(false);
   const [telemetryReloadKey, setTelemetryReloadKey] = useState(0);
+
+  const [dashboardData, setDashboardData] = useState<{
+    farms: Farm[];
+    devices: Device[];
+    zones: Zone[];
+  } | null>(null);
+  const [dashboardLoading, setDashboardLoading] = useState(false);
+  const [dashboardError, setDashboardError] = useState("");
+  const [dashboardWeather, setDashboardWeather] = useState<FarmWeather | null>(null);
+  const [dashboardWeatherError, setDashboardWeatherError] = useState("");
+  const [dashboardWeatherLoading, setDashboardWeatherLoading] = useState(false);
+  const [dashboardAirPollution, setDashboardAirPollution] = useState<FarmAirPollution | null>(null);
+  const [dashboardAirPollutionError, setDashboardAirPollutionError] = useState("");
+  const [dashboardAirPollutionLoading, setDashboardAirPollutionLoading] = useState(false);
+  const [dashboardReadings, setDashboardReadings] = useState<TelemetryReading[]>([]);
+  const [dashboardTelemetryLoading, setDashboardTelemetryLoading] = useState(false);
+  const [dashboardTelemetryError, setDashboardTelemetryError] = useState("");
 
 const [relayBusyKey, setRelayBusyKey] = useState("");
 const [relayPanelsOpen, setRelayPanelsOpen] = useState<Record<string, boolean>>({});
@@ -258,11 +414,9 @@ useLayoutEffect(() => {
   setCommandHistoryLoading({});
 }, [tenantId]);
 
-  const [selectedFarm, setSelectedFarm] = useState<{
-    id: string; name: string; timezone: string;
-    created_at: string; updated_at: string;
-    displayId: string;
-  } | null>(null);
+  const [selectedFarm, setSelectedFarm] = useState<
+    (Farm & { displayId: string }) | null
+  >(null);
 
   const canManageFarms = ["owner", "operator"].includes(
     authorizedTenants.find(
@@ -335,7 +489,7 @@ useLayoutEffect(() => {
 
   useEffect(() => {
     if (
-      selectedPage !== "farms" ||
+      (selectedPage !== "farms" && selectedPage !== "devices") ||
       tenantListLoading
     ) {
       setFarms([]);
@@ -405,6 +559,56 @@ useLayoutEffect(() => {
 
   useEffect(() => {
     let cancelled = false;
+    const objectUrls: string[] = [];
+    const authorizedTenant = authorizedTenants.find(
+      (item) => item.id.toLowerCase() === tenantId.trim().toLowerCase(),
+    );
+
+    const imageFarmIds = Array.from(
+      new Set([
+        ...farms.map((farm) => farm.id),
+        ...(selectedFarm ? [selectedFarm.id] : []),
+      ]),
+    );
+
+    if (tenantListLoading || !authorizedTenant || imageFarmIds.length === 0) {
+      setFarmImageUrls({});
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setFarmImageUrls({});
+    void Promise.all(
+      imageFarmIds.map(async (farmId) => {
+        try {
+          const blob = await farmApi.getImage(authorizedTenant.id, farmId);
+          if (cancelled) return;
+          if (!blob.type.startsWith("image/")) return;
+          const url = URL.createObjectURL(blob);
+          objectUrls.push(url);
+          setFarmImageUrls((current) => ({ ...current, [farmId]: url }));
+        } catch {
+          // ฟาร์มที่ยังไม่มีรูปใช้ไอคอนเริ่มต้นแทน
+        }
+      }),
+    );
+
+    return () => {
+      cancelled = true;
+      objectUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [
+    farms,
+    selectedFarm?.id,
+    tenantId,
+    authorizedTenants,
+    tenantListLoading,
+    farmImageReloadKey,
+  ]);
+
+  useEffect(() => {
+    let cancelled = false;
     const authorizedTenant = authorizedTenants.find(
       (item) => item.id.toLowerCase() === tenantId.trim().toLowerCase(),
     );
@@ -461,6 +665,164 @@ useLayoutEffect(() => {
   const authorizedDeviceTenant = authorizedTenants.find(
     (item) => item.id.toLowerCase() === tenantId.trim().toLowerCase(),
   );
+
+  useEffect(() => {
+    if (selectedPage !== "dashboard") return;
+
+    if (tenantListLoading) return;
+
+    if (!authorizedDeviceTenant) {
+      setDashboardData(null);
+      setDashboardError("");
+      setDashboardLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    let inFlight = false;
+    const requestedTenantId = authorizedDeviceTenant.id;
+
+    // Clear previous tenant data immediately to prevent stale cross-tenant display.
+    setDashboardData(null);
+    setDashboardError("");
+
+    const loadDashboard = async (showLoading = false) => {
+      if (inFlight || cancelled) return;
+
+      inFlight = true;
+      if (showLoading) setDashboardLoading(true);
+
+      try {
+        const [farmItems, deviceItems] = await Promise.all([
+          farmApi.list(requestedTenantId),
+          deviceApi.list(requestedTenantId),
+        ]);
+
+        const zoneGroups = await Promise.all(
+          farmItems.map((farm) =>
+            zoneApi.list(requestedTenantId, farm.id),
+          ),
+        );
+
+        if (cancelled) return;
+
+        setDashboardData({
+          farms: farmItems,
+          devices: deviceItems,
+          zones: zoneGroups.flat(),
+        });
+        setDashboardError("");
+      } catch (error: unknown) {
+        if (cancelled) return;
+
+        setDashboardData(null);
+        setDashboardError(
+          error instanceof ApiError
+            ? error.message
+            : "ไม่สามารถโหลดข้อมูลภาพรวมฟาร์มได้",
+        );
+      } finally {
+        inFlight = false;
+        if (!cancelled && showLoading) {
+          setDashboardLoading(false);
+        }
+      }
+    };
+
+    void loadDashboard(true);
+
+    const refreshTimer = window.setInterval(() => {
+      void loadDashboard();
+    }, 30_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(refreshTimer);
+    };
+  }, [
+    selectedPage,
+    authorizedDeviceTenant?.id,
+    tenantListLoading,
+  ]);
+
+  useEffect(() => {
+    if (selectedPage !== "dashboard") return;
+
+    if (tenantListLoading) return;
+
+    if (!authorizedDeviceTenant) {
+      setDashboardReadings([]);
+      setDashboardTelemetryError("");
+      setDashboardTelemetryLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    let inFlight = false;
+    const requestedTenantId = authorizedDeviceTenant.id;
+
+    const rangeMilliseconds =
+      selectedRange === "1 ชั่วโมง"
+        ? 60 * 60 * 1000
+        : selectedRange === "7 วัน"
+          ? 7 * 24 * 60 * 60 * 1000
+          : 24 * 60 * 60 * 1000;
+
+    setDashboardReadings([]);
+    setDashboardTelemetryError("");
+
+    const loadDashboardTelemetry = async (showLoading = false) => {
+      if (cancelled || inFlight) return;
+
+      inFlight = true;
+      if (showLoading) setDashboardTelemetryLoading(true);
+
+      try {
+        const until = new Date().toISOString();
+        const since = new Date(Date.now() - rangeMilliseconds).toISOString();
+
+        const readings = await telemetryApi.list(requestedTenantId, {
+          since,
+          until,
+          limit: 500,
+        });
+
+        if (cancelled) return;
+
+        setDashboardReadings(readings);
+        setDashboardTelemetryError("");
+      } catch (error: unknown) {
+        if (cancelled) return;
+
+        setDashboardTelemetryError(
+          error instanceof ApiError
+            ? error.message
+            : "ไม่สามารถโหลดข้อมูลเซนเซอร์ย้อนหลังได้",
+        );
+      } finally {
+        inFlight = false;
+        if (!cancelled && showLoading) {
+          setDashboardTelemetryLoading(false);
+        }
+      }
+    };
+
+    void loadDashboardTelemetry(true);
+
+    const refreshTimer = window.setInterval(() => {
+      void loadDashboardTelemetry();
+    }, 30_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(refreshTimer);
+    };
+  }, [
+    selectedPage,
+    authorizedDeviceTenant?.id,
+    tenantListLoading,
+    selectedRange,
+  ]);
 
   useEffect(() => {
     if (selectedPage !== "devices") {
@@ -625,6 +987,146 @@ useLayoutEffect(() => {
     };
   }, [selectedPage, tenantId, selectedFarm?.id, authorizedTenants, tenantListLoading, devicesReloadKey]);
 
+  // Refresh relay command history periodically while the device page is open.
+  // This is read-only: it never sends commands to the ESP32.
+  useEffect(() => {
+    const requestedTenantId = authorizedDeviceTenant?.id;
+
+    if (
+      selectedPage !== "devices" ||
+      tenantListLoading ||
+      !requestedTenantId ||
+      devicesLoading ||
+      !devicesRequested ||
+      devices.length === 0
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    let refreshing = false;
+
+    const refreshRelayHistory = async () => {
+      if (refreshing || cancelled) return;
+      refreshing = true;
+
+      try {
+        const results = await Promise.all(
+          devices.map(async (device) => {
+            try {
+              const history = await commandApi.history(
+                requestedTenantId,
+                device.id,
+                100,
+              );
+              return { device, history: history.commands, error: "" };
+            } catch (error) {
+              return {
+                device,
+                history: null,
+                error: error instanceof Error
+                  ? error.message
+                  : "โหลดประวัติคำสั่งไม่สำเร็จ",
+              };
+            }
+          }),
+        );
+
+        if (
+          cancelled ||
+          tenantContextRef.current !== requestedTenantId
+        ) {
+          return;
+        }
+
+        for (const result of results) {
+          const deviceId = result.device.id;
+
+          if (result.history === null) {
+            setCommandHistoryErrors((previous) => ({
+              ...previous,
+              [deviceId]: result.error,
+            }));
+            continue;
+          }
+
+          const history = result.history;
+
+          setCommandHistories((previous) => ({
+            ...previous,
+            [deviceId]: history,
+          }));
+          setCommandHistoryErrors((previous) => ({
+            ...previous,
+            [deviceId]: "",
+          }));
+
+          setRelayReportedStates((previous) => {
+            const next = { ...previous };
+
+            for (const relay of [1, 2, 3, 4]) {
+              const key = `${deviceId}:${relay}`;
+              const latest = history.find(
+                (command) =>
+                  command.command_type === "relay.set" &&
+                  command.parameters?.relay === relay,
+              );
+
+              next[key] =
+                latest?.status === "succeeded" &&
+                (latest.parameters?.state === "on" ||
+                  latest.parameters?.state === "off")
+                  ? latest.parameters.state
+                  : "unknown";
+            }
+
+            return next;
+          });
+
+          setRelayErrors((previous) => {
+            const next = { ...previous };
+
+            for (const relay of [1, 2, 3, 4]) {
+              const key = `${deviceId}:${relay}`;
+              const latest = history.find(
+                (command) =>
+                  command.command_type === "relay.set" &&
+                  command.parameters?.relay === relay,
+              );
+
+              next[key] =
+                latest && ["failed", "expired"].includes(latest.status)
+                  ? `คำสั่ง Relay สิ้นสุดด้วยสถานะ ${latest.status}`
+                  : "";
+            }
+
+            return next;
+          });
+        }
+      } finally {
+        refreshing = false;
+      }
+    };
+
+    // Start after the initial device/history restoration to avoid racing it.
+    const timer = window.setInterval(
+      () => void refreshRelayHistory(),
+      10_000,
+    );
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    selectedPage,
+    tenantListLoading,
+    authorizedDeviceTenant?.id,
+    devicesLoading,
+    devicesRequested,
+    devices,
+  ]);
+
   useEffect(() => {
     if (selectedPage !== "devices" || tenantListLoading) {
       return;
@@ -700,6 +1202,7 @@ useLayoutEffect(() => {
     }
 
     let cancelled = false;
+    let inFlight = false;
     const requestedTenantId = authorizedDeviceTenant.id;
 
     setTelemetryReadings([]);
@@ -707,28 +1210,364 @@ useLayoutEffect(() => {
     setTelemetryError("");
     setTelemetryRequested(true);
 
-    telemetryApi.list(requestedTenantId, { latest_only: true, limit: 100 })
-      .then((result) => {
+    const loadTelemetry = async (showLoading = false) => {
+      if (cancelled || inFlight) return;
+
+      inFlight = true;
+      if (showLoading) setTelemetryLoading(true);
+
+      try {
+        const result = await telemetryApi.list(
+          requestedTenantId,
+          { latest_only: true, limit: 100 },
+        );
+
         if (cancelled) return;
         setTelemetryReadings(result);
-      })
-      .catch((error: unknown) => {
+        setTelemetryError("");
+      } catch (error: unknown) {
         if (cancelled) return;
-        setTelemetryReadings([]);
         setTelemetryError(
           error instanceof ApiError
             ? error.message
             : "ไม่สามารถโหลดค่าเซนเซอร์ได้ กรุณาลองใหม่",
         );
+      } finally {
+        inFlight = false;
+        if (!cancelled && showLoading) setTelemetryLoading(false);
+      }
+    };
+
+    void loadTelemetry(true);
+
+    const refreshTimer = window.setInterval(() => {
+      void loadTelemetry();
+    }, 30_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(refreshTimer);
+    };
+  }, [selectedPage, authorizedDeviceTenant?.id, tenantListLoading, telemetryReloadKey]);
+
+  const dashboardNow = Date.now();
+
+  const dashboardDevices = dashboardData?.devices ?? [];
+
+  const selectedDashboardFarm =
+    dashboardData?.farms.find((farm) => farm.id === selectedDashboardFarmId) ??
+    dashboardData?.farms[0] ??
+    null;
+
+  const selectedDashboardFarmIdEffective = selectedDashboardFarm?.id ?? "";
+
+
+  useEffect(() => {
+    if (selectedPage !== "dashboard") {
+      setDashboardWeather(null);
+      setDashboardWeatherError("");
+      setDashboardWeatherLoading(false);
+      return;
+    }
+
+    if (!authorizedDeviceTenant || !selectedDashboardFarm) {
+      setDashboardWeather(null);
+      setDashboardWeatherError("");
+      setDashboardWeatherLoading(false);
+      return;
+    }
+
+    if (
+      selectedDashboardFarm.latitude === null ||
+      selectedDashboardFarm.longitude === null
+    ) {
+      setDashboardWeather(null);
+      setDashboardWeatherError("กรุณากำหนด Latitude และ Longitude ให้ฟาร์มนี้ก่อน");
+      setDashboardWeatherLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setDashboardWeather(null);
+    setDashboardWeatherError("");
+    setDashboardWeatherLoading(true);
+
+    weatherApi
+      .get(authorizedDeviceTenant.id, selectedDashboardFarm.id)
+      .then((weather) => {
+        if (cancelled) return;
+        setDashboardWeather(weather);
+        setDashboardWeatherError("");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setDashboardWeather(null);
+        setDashboardWeatherError(
+          error instanceof ApiError
+            ? error.message
+            : "ไม่สามารถโหลดข้อมูลสภาพอากาศได้",
+        );
       })
       .finally(() => {
-        if (!cancelled) setTelemetryLoading(false);
+        if (!cancelled) setDashboardWeatherLoading(false);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [selectedPage, authorizedDeviceTenant?.id, tenantListLoading, telemetryReloadKey]);
+  }, [
+    selectedPage,
+    authorizedDeviceTenant?.id,
+    selectedDashboardFarm?.id,
+    selectedDashboardFarm?.latitude,
+    selectedDashboardFarm?.longitude,
+  ]);
+
+
+  useEffect(() => {
+    if (
+      selectedPage !== "dashboard" ||
+      !authorizedDeviceTenant ||
+      !selectedDashboardFarm
+    ) {
+      setDashboardAirPollution(null);
+      setDashboardAirPollutionError("");
+      setDashboardAirPollutionLoading(false);
+      return;
+    }
+
+    if (
+      selectedDashboardFarm.latitude === null ||
+      selectedDashboardFarm.longitude === null
+    ) {
+      setDashboardAirPollution(null);
+      setDashboardAirPollutionError(
+        "กรุณากำหนดพิกัดฟาร์มก่อนดูข้อมูล PM2.5",
+      );
+      setDashboardAirPollutionLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setDashboardAirPollution(null);
+    setDashboardAirPollutionError("");
+    setDashboardAirPollutionLoading(true);
+
+    airPollutionApi
+      .get(authorizedDeviceTenant.id, selectedDashboardFarm.id)
+      .then((air) => {
+        if (cancelled) return;
+        setDashboardAirPollution(air);
+        setDashboardAirPollutionError("");
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setDashboardAirPollution(null);
+        setDashboardAirPollutionError(
+          error instanceof ApiError
+            ? error.message
+            : "ไม่สามารถโหลดข้อมูล PM2.5 ได้",
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setDashboardAirPollutionLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    selectedPage,
+    authorizedDeviceTenant?.id,
+    selectedDashboardFarm?.id,
+    selectedDashboardFarm?.latitude,
+    selectedDashboardFarm?.longitude,
+  ]);
+
+  const selectedDashboardFarmZones = (dashboardData?.zones ?? []).filter(
+    (zone) => zone.farm_id === selectedDashboardFarmIdEffective,
+  );
+
+  const selectedDashboardFarmDevices = dashboardDevices.filter(
+    (device) => device.farm_id === selectedDashboardFarmIdEffective,
+  );
+
+  const selectedDashboardFarmOnlineDevices = selectedDashboardFarmDevices.filter(
+    (device) => isDeviceRecentlyOnline(device, dashboardNow),
+  ).length;
+  const selectedDashboardZones = (dashboardData?.zones ?? []).filter(
+    (zone) => zone.farm_id === selectedDashboardFarmIdEffective,
+  );
+
+  const selectedDashboardChartZone =
+    selectedDashboardFarmZones.find(
+      (zone) => zone.id === selectedDashboardZoneId,
+    ) ??
+    selectedDashboardFarmZones[0] ??
+    null;
+
+  const selectedDashboardChartZoneId = selectedDashboardChartZone?.id ?? "";
+
+  const selectedDashboardStatusZoneIdEffective =
+    selectedDashboardFarmZones.some(
+      (zone) => zone.id === selectedDashboardStatusZoneId,
+    )
+      ? selectedDashboardStatusZoneId
+      : selectedDashboardFarmZones[0]?.id ?? "";
+
+  const selectedDashboardStatusZoneDeviceIds = new Set(
+    selectedDashboardFarmDevices
+      .filter(
+        (device) => device.zone_id === selectedDashboardStatusZoneIdEffective
+      )
+      .map((device) => device.id),
+  );
+
+  const selectedDashboardZoneDeviceIds = new Set(
+    dashboardDevices
+      .filter((device) =>
+        device.zone_id === selectedDashboardChartZoneId &&
+        device.farm_id === selectedDashboardFarmIdEffective
+      )
+      .map((device) => device.id),
+  );
+
+  const getDashboardLatestSensorReading = (aliases: string[]) =>
+    dashboardReadings
+      .filter((reading) =>
+        selectedDashboardStatusZoneDeviceIds.has(reading.device_id) &&
+        reading.quality_status.trim().toLowerCase() === "valid" &&
+        Number.isFinite(Number(reading.value)) &&
+        Number.isFinite(Date.parse(reading.measured_at)) &&
+        aliases.includes(reading.metric.trim().toLowerCase())
+      )
+      .sort(
+        (a, b) =>
+          Date.parse(b.measured_at) - Date.parse(a.measured_at),
+      )[0] ?? null;
+
+  const dashboardLatestTemperature =
+    getDashboardLatestSensorReading(["temperature", "air_temperature"]);
+
+  const dashboardLatestHumidity =
+    getDashboardLatestSensorReading(["humidity", "air_humidity"]);
+
+  const dashboardGatewayDevices = dashboardDevices.filter(
+    (device) => device.device_type.trim().toLowerCase() === "gateway",
+  );
+
+  const dashboardOnlineGateways = dashboardData
+    ? dashboardGatewayDevices.filter((device) =>
+        isDeviceRecentlyOnline(device, dashboardNow),
+      ).length
+    : null;
+
+  const dashboardMetricValues = [
+    dashboardData ? dashboardGatewayDevices.length : null,
+    null,
+  ];
+
+  const dashboardMetricAliases: Record<string, string[]> = {
+    "อุณหภูมิ": ["temperature", "air_temperature"],
+    "ความชื้นอากาศ": ["humidity", "air_humidity"],
+    "ความชื้นดิน": ["soil_moisture"],
+    "VPD": ["vpd"],
+  };
+
+  const dashboardValidReadings = dashboardReadings
+    .filter((reading) =>
+      reading.quality_status.trim().toLowerCase() === "valid" &&
+      Number.isFinite(Number(reading.value)) &&
+      Number.isFinite(Date.parse(reading.measured_at))
+    )
+    .filter((reading) =>
+      selectedDashboardZoneDeviceIds.has(reading.device_id)
+    )
+    .filter((reading) =>
+      (dashboardMetricAliases[selectedVariable] ?? []).includes(
+        reading.metric.trim().toLowerCase(),
+      )
+    )
+    .sort(
+      (a, b) =>
+        Date.parse(a.measured_at) - Date.parse(b.measured_at),
+    );
+
+  const dashboardChartReadings = dashboardValidReadings.slice(-60);
+  const dashboardChartValues = dashboardChartReadings.map(
+    (reading) => Number(reading.value),
+  );
+  const dashboardChartMin = dashboardChartValues.length
+    ? Math.min(...dashboardChartValues)
+    : 0;
+  const dashboardChartMax = dashboardChartValues.length
+    ? Math.max(...dashboardChartValues)
+    : 0;
+  const dashboardChartSpan =
+    dashboardChartMax - dashboardChartMin || 1;
+
+  const dashboardChartPoints = dashboardChartReadings.map(
+    (reading, index) => ({
+      x: dashboardChartReadings.length <= 1
+        ? 300
+        : 20 + (index / (dashboardChartReadings.length - 1)) * 560,
+      y: 165 - (
+        (Number(reading.value) - dashboardChartMin) /
+        dashboardChartSpan
+      ) * 130,
+      reading,
+    }),
+  );
+
+  const dashboardLatestReading =
+    dashboardValidReadings[dashboardValidReadings.length - 1] ?? null;
+
+
+  useEffect(() => {
+    if (selectedPage !== "sensors" || tenantListLoading) return;
+
+    if (!authorizedDeviceTenant) {
+      setSensorDevices([]);
+      setSensors([]);
+      setSensorsError("ไม่พบ Tenant ที่ได้รับอนุญาต");
+      setSensorsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    const tenant = authorizedDeviceTenant.id;
+    setSensorsLoading(true);
+    setSensorsError("");
+
+    void (async () => {
+      try {
+        const loadedDevices = await deviceApi.list(tenant);
+        const results = await Promise.all(
+          loadedDevices.map(async (device) => ({
+            device,
+            sensors: await sensorApi.list(tenant, device.id),
+          })),
+        );
+
+        if (cancelled) return;
+
+        setSensorDevices(loadedDevices);
+        setSensors(results.flatMap((result) => result.sensors));
+        setSensorFormDeviceId((current) =>
+          loadedDevices.some((device) => device.id === current)
+            ? current
+            : loadedDevices[0]?.id ?? "",
+        );
+      } catch (error) {
+        if (cancelled) return;
+        setSensorsError(error instanceof Error ? error.message : "โหลด Sensor ไม่สำเร็จ");
+      } finally {
+        if (!cancelled) setSensorsLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [selectedPage, tenantListLoading, authorizedDeviceTenant?.id, sensorReloadKey]);
 
   const page = pageTitles[selectedPage] ?? pageTitles.dashboard;
 
@@ -900,72 +1739,6 @@ useLayoutEffect(() => {
 
           {selectedPage === "dashboard" ? (
             <>
-              <section className="welcome-banner">
-                <div className="welcome-content">
-                  <span className="welcome-kicker">
-                    <span className="welcome-kicker-dot" />
-                    FARM OVERVIEW
-                  </span>
-                  <h2>จัดการฟาร์มอย่างมั่นใจ<br />ในทุกวัน</h2>
-                  <p>
-                    รวมข้อมูลสภาพแวดล้อม โซนเพาะปลูก
-                    และอุปกรณ์ไว้ในหน้าจอเดียว
-                  </p>
-                  <button
-                    className="primary-button"
-                    type="button"
-                    onClick={() => navigate("zones")}
-                  >
-                    ดูโซนเพาะปลูก <span aria-hidden="true">→</span>
-                  </button>
-                </div>
-                <div className="welcome-art" aria-hidden="true">
-                  <div className="art-sun" />
-                  <div className="art-hill art-hill-back" />
-                  <div className="art-hill art-hill-front" />
-                  <div className="art-greenhouse">
-                    <div className="greenhouse-roof" />
-                    <div className="greenhouse-body">
-                      <span /><span /><span />
-                    </div>
-                  </div>
-                  <div className="art-plant art-plant-one">♧</div>
-                  <div className="art-plant art-plant-two">♧</div>
-                </div>
-              </section>
-
-              <section className="section-block">
-                <div className="section-heading">
-                  <div>
-                    <h2>สถานะฟาร์ม</h2>
-                    <p>สรุปสถานะจากข้อมูลที่ระบบได้รับ</p>
-                  </div>
-                  <span className="section-note">
-                    <span className="status-dot status-dot-muted" />
-                    ยังไม่มีข้อมูลจริง
-                  </span>
-                </div>
-
-                <div className="metric-grid">
-                  {metrics.map((metric) => (
-                    <article className="metric-card" key={metric.label}>
-                      <div className="metric-card-top">
-                        <span className="metric-icon" aria-hidden="true">
-                          {metric.icon}
-                        </span>
-                        <span className="metric-more" aria-hidden="true">···</span>
-                      </div>
-                      <p className="metric-label">{metric.label}</p>
-                      <div className="metric-value-row">
-                        <strong>—</strong>
-                        <span>{metric.unit}</span>
-                      </div>
-                      <p className="metric-footnote">รอข้อมูลจากระบบ</p>
-                    </article>
-                  ))}
-                </div>
-              </section>
-
               <section className="section-block">
                 <div className="section-heading">
                   <div>
@@ -979,14 +1752,22 @@ useLayoutEffect(() => {
                   <div className="weather-summary">
                     <span className="weather-icon" aria-hidden="true">☁</span>
                     <div>
-                      <strong>— <small>°C</small></strong>
-                      <span>ยังไม่มีข้อมูลสภาพอากาศ</span>
+                      <strong>
+                        {dashboardWeather ? dashboardWeather.temperature.toFixed(1) : "—"} <small>°C</small>
+                      </strong>
+                      <span>
+                        {dashboardWeatherLoading
+                          ? "กำลังโหลดสภาพอากาศ..."
+                          : dashboardWeather
+                            ? dashboardWeather.description
+                            : dashboardWeatherError || "ยังไม่มีข้อมูลสภาพอากาศ"}
+                      </span>
                     </div>
                   </div>
                   <div className="weather-detail-grid">
                     {[
                       ["ความชื้นสัมพัทธ์", "%", "◌"],
-                      ["PM2.5", "µg/m³", "◉"],
+                      ["อุณหภูมิที่รู้สึกได้", "°C", "♨"],
                       ["ความเร็วลม", "m/s", "↝"],
                       ["ทิศทางลม", "", "⌖"],
                     ].map(([label, unit, icon]) => (
@@ -994,10 +1775,42 @@ useLayoutEffect(() => {
                         <span className="weather-detail-icon">{icon}</span>
                         <span className="weather-detail-copy">
                           <small>{label}</small>
-                          <strong>— <small>{unit}</small></strong>
+                          <strong>
+                            {dashboardWeather
+                              ? (
+                                  label === "ความชื้นสัมพัทธ์"
+                                    ? dashboardWeather.humidity
+                                    : label === "อุณหภูมิที่รู้สึกได้"
+                                      ? dashboardWeather.feels_like.toFixed(1)
+                                      : label === "ความเร็วลม"
+                                        ? dashboardWeather.wind_speed.toFixed(1)
+                                        : dashboardWeather.wind_deg === null
+                                          ? "—"
+                                          : `${dashboardWeather.wind_deg}°`
+                                )
+                              : "—"} <small>{unit}</small>
+                          </strong>
                         </span>
                       </div>
                     ))}
+                  </div>
+                  <div className="weather-air-quality" aria-live="polite">
+                    <span className="weather-detail-icon" aria-hidden="true">◉</span>
+                    <div className="weather-air-quality-copy">
+                      <small>ฝุ่น PM2.5</small>
+                      <strong>
+                        {dashboardAirPollution
+                          ? dashboardAirPollution.pm2_5.toFixed(2)
+                          : "—"} <small>µg/m³</small>
+                      </strong>
+                      <span>
+                        {dashboardAirPollutionLoading
+                          ? "กำลังโหลดข้อมูลคุณภาพอากาศ..."
+                          : dashboardAirPollution
+                            ? `AQI ${dashboardAirPollution.aqi} · ${dashboardAirPollution.aqi_label}`
+                            : dashboardAirPollutionError || "ยังไม่มีข้อมูล PM2.5"}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </section>
@@ -1005,35 +1818,257 @@ useLayoutEffect(() => {
               <section className="section-block">
                 <div className="section-heading">
                   <div>
+                    <h2>สถานะฟาร์ม</h2>
+                    <p>สรุปสถานะจากข้อมูลที่ระบบได้รับ</p>
+                  </div>
+                  <span className="section-note">
+                    <span
+                      className={`status-dot ${
+                        dashboardError || !dashboardData
+                          ? "status-dot-muted"
+                          : ""
+                      }`}
+                    />
+                    {dashboardLoading && !dashboardData
+                      ? "กำลังโหลดข้อมูล"
+                      : dashboardError
+                        ? "โหลดข้อมูลไม่สำเร็จ"
+                        : dashboardData
+                          ? "เชื่อมต่อข้อมูลจริงแล้ว"
+                          : "รอเลือก Tenant"}
+                  </span>
+                </div>
+
+                <div className="farm-status-panel">
+                  <label className="select-wrap">
+                    <span className="sr-only">เลือกฟาร์มสำหรับดูสถานะ</span>
+                    <select
+                      value={selectedDashboardFarmIdEffective}
+                      onChange={(event) =>
+                        setSelectedDashboardFarmId(event.target.value)
+                      }
+                      disabled={!dashboardData?.farms.length}
+                    >
+                      {(dashboardData?.farms ?? []).map((farm) => (
+                        <option key={farm.id} value={farm.id}>
+                          {farm.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="select-wrap farm-status-zone-select">
+                    <span className="sr-only">เลือกโซนสำหรับดูสถานะฟาร์ม</span>
+                    <select
+                      value={selectedDashboardStatusZoneIdEffective}
+                      onChange={(event) =>
+                        setSelectedDashboardStatusZoneId(event.target.value)
+                      }
+                      disabled={!selectedDashboardFarmZones.length}
+                    >
+                      {selectedDashboardFarmZones.map((zone) => (
+                        <option key={zone.id} value={zone.id}>
+                          {zone.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  {selectedDashboardFarm ? (
+                    <div className="farm-selected-summary">
+                      <div className="farm-selected-summary-heading">
+                        <strong>{selectedDashboardFarm.name}</strong>
+                        <span>สรุปข้อมูลฟาร์มที่เลือก</span>
+                      </div>
+                      <div className="farm-status-counts">
+                        <div>
+                          <strong>{selectedDashboardFarmZones.length}</strong>
+                          <span>โซน</span>
+                        </div>
+                        <div>
+                          <strong>{selectedDashboardFarmDevices.length}</strong>
+                          <span>อุปกรณ์</span>
+                        </div>
+                      </div>
+                      <p>
+                        ออนไลน์ {selectedDashboardFarmOnlineDevices} จาก{" "}
+                        {selectedDashboardFarmDevices.length} อุปกรณ์
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="metric-grid">
+                  {metrics.map((metric, index) => {
+                    const value = dashboardMetricValues[index];
+
+                    return (
+                      <article className="metric-card" key={metric.label}>
+                        <div className="metric-card-top">
+                          <span className="metric-icon" aria-hidden="true">
+                            {metric.icon}
+                          </span>
+                          <span className="metric-more" aria-hidden="true">···</span>
+                        </div>
+                        <p className="metric-label">{metric.label}</p>
+                        <div className="metric-value-row">
+                          <strong>
+                            {dashboardLoading && !dashboardData
+                              ? "…"
+                              : value === null
+                                ? "—"
+                                : value}
+                          </strong>
+                          <span>{metric.unit}</span>
+                        </div>
+                        <p className="metric-footnote">
+                          {dashboardLoading && !dashboardData
+                            ? "กำลังโหลดข้อมูล"
+                            : dashboardError
+                              ? "โหลดข้อมูลไม่สำเร็จ"
+                              : index === 1
+                                ? "รอเชื่อมต่อ Alerts API"
+                                : dashboardData
+                                  ? `ออนไลน์ ${dashboardOnlineGateways ?? 0} Gateway · อัปเดตทุก 30 วินาที`
+                                  : "รอข้อมูลจากระบบ"}
+                        </p>
+                      </article>
+                    );
+                  })}
+                </div>
+
+                <div className="dashboard-sensor-grid">
+                  {[
+                    {
+                      label: "อุณหภูมิภายในฟาร์ม",
+                      icon: "🌡",
+                      reading: dashboardLatestTemperature,
+                      unit: "°C",
+                    },
+                    {
+                      label: "ความชื้นอากาศภายในฟาร์ม",
+                      icon: "💧",
+                      reading: dashboardLatestHumidity,
+                      unit: "%",
+                    },
+                  ].map((sensor) => (
+                    <article className="metric-card" key={sensor.label}>
+                      <div className="metric-card-top">
+                        <span className="metric-icon" aria-hidden="true">
+                          {sensor.icon}
+                        </span>
+                        <span className="metric-more" aria-hidden="true">●</span>
+                      </div>
+                      <p className="metric-label">{sensor.label}</p>
+                      <div className="metric-value-row">
+                        <strong>
+                          {sensor.reading
+                            ? Number(sensor.reading.value).toLocaleString(
+                                "th-TH",
+                                { maximumFractionDigits: 2 },
+                              )
+                            : "—"}
+                        </strong>
+                        <span>{sensor.reading?.unit ?? sensor.unit}</span>
+                      </div>
+                      <p className="metric-footnote">
+                        {dashboardTelemetryLoading && !sensor.reading
+                          ? "กำลังโหลดข้อมูลเซนเซอร์..."
+                          : dashboardTelemetryError
+                            ? "โหลดข้อมูลไม่สำเร็จ"
+                            : sensor.reading
+                              ? `อัปเดต ${new Date(
+                                  sensor.reading.measured_at,
+                                ).toLocaleString("th-TH")}`
+                              : "ยังไม่มีข้อมูลในโซนนี้"}
+                      </p>
+                    </article>
+                  ))}
+                </div>
+              </section>
+
+
+
+              <section className="section-block">
+                <div className="section-heading">
+                  <div>
                     <h2>ภาพรวมโซนเพาะปลูก</h2>
                     <p>เลือกโซนเพื่อดูค่าเซนเซอร์และอุปกรณ์ที่เกี่ยวข้อง</p>
                   </div>
-                  <button
-                    className="text-button"
-                    type="button"
-                    onClick={() => navigate("zones")}
-                  >
-                    ดูโซนทั้งหมด <span aria-hidden="true">→</span>
-                  </button>
                 </div>
 
-                <div className="zone-empty-panel">
-                  <div className="empty-illustration" aria-hidden="true">
-                    <span>♧</span>
+                {dashboardLoading && !dashboardData ? (
+                  <div className="zone-empty-panel">
+                    <strong>กำลังโหลดข้อมูลโซน...</strong>
                   </div>
-                  <h3>ยังไม่มีข้อมูลโซน</h3>
-                  <p>
-                    เมื่อเชื่อมต่อข้อมูลฟาร์มแล้ว
-                    ค่าจากเซนเซอร์และสถานะอุปกรณ์จะแสดงที่นี่
-                  </p>
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    onClick={() => navigate("zones")}
-                  >
-                    ไปยัง Zone Management
-                  </button>
-                </div>
+                ) : dashboardError ? (
+                  <div className="zone-empty-panel">
+                    <h3>โหลดข้อมูลโซนไม่สำเร็จ</h3>
+                    <p>{dashboardError}</p>
+                  </div>
+                ) : dashboardData && selectedDashboardZones.length > 0 ? (
+                  <div className="dashboard-zone-grid">
+                    {selectedDashboardZones.map((zone) => {
+                      const farm = dashboardData.farms.find(
+                        (item) => item.id === zone.farm_id,
+                      );
+
+                      return (
+                        <article className="dashboard-zone-card" key={zone.id}>
+                          <div className="dashboard-zone-card-top">
+                            <span className="dashboard-zone-icon" aria-hidden="true">
+                              {zone.zone_type === "fish_pond"
+                                ? "◉"
+                                : zone.zone_type === "livestock"
+                                  ? "♧"
+                                  : zone.zone_type === "cctv"
+                                    ? "◎"
+                                    : "♣"}
+                            </span>
+                            <span className={
+                              zone.status === "active"
+                                ? "dashboard-zone-status active"
+                                : "dashboard-zone-status"
+                            }>
+                              {zone.status === "active" ? "ใช้งาน" : "ปิดใช้งาน"}
+                            </span>
+                          </div>
+                          <h3>{zone.name}</h3>
+                          <p className="dashboard-zone-farm">
+                            ฟาร์ม: {farm?.name ?? "ไม่พบข้อมูลฟาร์ม"}
+                          </p>
+                          <p className="dashboard-zone-type">
+                            {zoneTypeLabels[zone.zone_type]}
+                          </p>
+                          {zone.description ? (
+                            <p className="dashboard-zone-description">
+                              {zone.description}
+                            </p>
+                          ) : null}
+                        </article>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="zone-empty-panel">
+                    <div className="empty-illustration" aria-hidden="true">
+                      <span>♧</span>
+                    </div>
+                    <h3>
+                      {selectedDashboardFarm
+                        ? "ฟาร์มนี้ยังไม่มีข้อมูลโซน"
+                        : "ยังไม่มีข้อมูลโซน"}
+                    </h3>
+                    <p>เพิ่มโซนในฟาร์มที่เลือกเพื่อเริ่มติดตามข้อมูลพื้นที่เพาะปลูก</p>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={() => navigate("zones")}
+                    >
+                      ไปยัง Zone Management
+                    </button>
+                  </div>
+                )}
               </section>
 
               <div className="dashboard-lower-grid">
@@ -1046,6 +2081,23 @@ useLayoutEffect(() => {
                   </div>
 
                   <div className="chart-toolbar">
+                    <label className="select-wrap">
+                      <span className="sr-only">เลือกโซนสำหรับกราฟ</span>
+                      <select
+                        value={selectedDashboardChartZoneId}
+                        onChange={(event) => setSelectedDashboardZoneId(event.target.value)}
+                        disabled={!selectedDashboardFarmZones.length}
+                      >
+                        {!selectedDashboardFarmZones.length ? (
+                          <option value="">ยังไม่มีโซนในฟาร์มนี้</option>
+                        ) : null}
+                        {selectedDashboardFarmZones.map((zone) => (
+                          <option key={zone.id} value={zone.id}>
+                            {zone.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                     <label className="select-wrap">
                       <span className="sr-only">ตัวแปรที่ต้องการดู</span>
                       <select
@@ -1073,18 +2125,89 @@ useLayoutEffect(() => {
                     </div>
                   </div>
 
-                  <div className="chart-empty">
+                  <div className="chart-empty dashboard-chart">
                     <div className="chart-grid-lines" aria-hidden="true">
                       <span /><span /><span /><span />
                     </div>
-                    <div className="chart-empty-content">
-                      <span className="chart-empty-icon" aria-hidden="true">⌁</span>
-                      <strong>ยังไม่มีข้อมูลกราฟ</strong>
-                      <span>
-                        {selectedVariable} · {selectedRange}
-                      </span>
-                      <small>จะแสดงกราฟเมื่อมีข้อมูลย้อนหลังที่ใช้งานได้</small>
-                    </div>
+                    {dashboardTelemetryLoading && dashboardReadings.length === 0 ? (
+                      <div className="chart-empty-content">
+                        <strong>กำลังโหลดข้อมูลเซนเซอร์...</strong>
+                        <small>{selectedVariable} · {selectedRange}</small>
+                      </div>
+                    ) : dashboardTelemetryError ? (
+                      <div className="chart-empty-content">
+                        <strong>โหลดข้อมูลกราฟไม่สำเร็จ</strong>
+                        <small>{dashboardTelemetryError}</small>
+                      </div>
+                    ) : dashboardChartPoints.length > 0 ? (
+                      <>
+                        <div className="dashboard-chart-summary">
+                          <strong>
+                            {dashboardLatestReading
+                              ? `${Number(dashboardLatestReading.value).toLocaleString(
+                                  "th-TH",
+                                  { maximumFractionDigits: 2 },
+                                )} ${dashboardLatestReading.unit}`
+                              : "—"}
+                          </strong>
+                          <small>
+                            ค่าล่าสุด · {dashboardLatestReading
+                              ? new Date(dashboardLatestReading.measured_at).toLocaleString("th-TH")
+                              : ""}
+                          </small>
+                        </div>
+                        <svg
+                          className="dashboard-chart-svg"
+                          viewBox="0 0 600 190"
+                          role="img"
+                          aria-label={`กราฟ${selectedVariable}ย้อนหลัง ${selectedRange}`}
+                          preserveAspectRatio="none"
+                        >
+                          {dashboardChartPoints.length > 1 ? (
+                            <polyline
+                              points={dashboardChartPoints
+                                .map((point) => `${point.x},${point.y}`)
+                                .join(" ")}
+                              fill="none"
+                              stroke="var(--sf-brand-strong)"
+                              strokeWidth="3"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          ) : null}
+                          {dashboardChartPoints.map((point) => (
+                            <circle
+                              key={point.reading.id}
+                              cx={point.x}
+                              cy={point.y}
+                              r="3.5"
+                              fill="var(--sf-brand-strong)"
+                            />
+                          ))}
+                        </svg>
+                        <div className="dashboard-chart-footer">
+                          <span>
+                            {dashboardChartReadings.length} จุดข้อมูล
+                          </span>
+                          <span>
+                            ช่วงค่า {dashboardChartMin.toLocaleString("th-TH", {
+                              maximumFractionDigits: 2,
+                            })} – {dashboardChartMax.toLocaleString("th-TH", {
+                              maximumFractionDigits: 2,
+                            })}
+                          </span>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="chart-empty-content">
+                        <span className="chart-empty-icon" aria-hidden="true">⌁</span>
+                        <strong>ยังไม่มีข้อมูลที่ใช้แสดงกราฟ</strong>
+                        <span>{selectedVariable} · {selectedRange}</span>
+                        <small>
+                          ไม่พบข้อมูลที่ผ่านการตรวจสอบในช่วงเวลานี้
+                        </small>
+                      </div>
+                    )}
                   </div>
                 </section>
 
@@ -1234,19 +2357,36 @@ useLayoutEffect(() => {
                       if (farmSaving || !tenantId) return;
                       const name = farmName.trim();
                       const timezone = farmTimezone.trim();
+                      const latitudeText = farmLatitude.trim();
+                      const longitudeText = farmLongitude.trim();
                       if (!name || !timezone) {
                         setFarmActionError("กรุณากรอกชื่อฟาร์มและเขตเวลา");
+                        return;
+                      }
+                      if (Boolean(latitudeText) !== Boolean(longitudeText)) {
+                        setFarmActionError("กรุณากรอก Latitude และ Longitude ให้ครบทั้งคู่ หรือเว้นว่างทั้งคู่");
+                        return;
+                      }
+                      const latitude = latitudeText === "" ? null : Number(latitudeText);
+                      const longitude = longitudeText === "" ? null : Number(longitudeText);
+                      if (
+                        (latitude !== null && (!Number.isFinite(latitude) || latitude < -90 || latitude > 90)) ||
+                        (longitude !== null && (!Number.isFinite(longitude) || longitude < -180 || longitude > 180))
+                      ) {
+                        setFarmActionError("พิกัดไม่ถูกต้อง: Latitude ต้องอยู่ระหว่าง -90 ถึง 90 และ Longitude ระหว่าง -180 ถึง 180");
                         return;
                       }
                       setFarmSaving(true);
                       setFarmActionError("");
                       setFarmActionMessage("");
                       try {
-                        const created = await farmApi.create(tenantId, { name, timezone });
+                        const created = await farmApi.create(tenantId, { name, timezone, latitude, longitude });
                         const displayId = `FARM-${String(farms.length + 1).padStart(2, "0")}`;
                         setSelectedFarm({ ...created, displayId });
                         setFarmName("");
                         setFarmTimezone("Asia/Bangkok");
+                        setFarmLatitude("");
+                        setFarmLongitude("");
                         setFarmFormMode(null);
                         setFarmActionMessage("สร้างฟาร์มสำเร็จ");
                         setFarmsReloadKey((key) => key + 1);
@@ -1284,6 +2424,31 @@ useLayoutEffect(() => {
                       <option value="Europe/London">Europe/London</option>
                       <option value="America/New_York">America/New_York</option>
                     </select>
+                    <label htmlFor="farm-create-latitude">Latitude (ละติจูด)</label>
+                    <input
+                      id="farm-create-latitude"
+                      type="number"
+                      step="any"
+                      min="-90"
+                      max="90"
+                      value={farmLatitude}
+                      onChange={(event) => setFarmLatitude(event.target.value)}
+                      disabled={farmSaving}
+                      placeholder="เช่น 13.7563"
+                    />
+                    <label htmlFor="farm-create-longitude">Longitude (ลองจิจูด)</label>
+                    <input
+                      id="farm-create-longitude"
+                      type="number"
+                      step="any"
+                      min="-180"
+                      max="180"
+                      value={farmLongitude}
+                      onChange={(event) => setFarmLongitude(event.target.value)}
+                      disabled={farmSaving}
+                      placeholder="เช่น 100.5018"
+                    />
+                    <p className="farm-helper-text">ระบุพิกัดของฟาร์มเพื่อให้ระบบดึงสภาพอากาศจากตำแหน่งฟาร์มโดยอัตโนมัติ หากยังไม่ทราบสามารถเว้นว่างไว้ก่อนได้</p>
                     {farmActionError && <p className="farm-message-error" role="alert">{farmActionError}</p>}
                     <div className="farm-crud-actions">
                       <button className="primary-button" type="submit" disabled={farmSaving}>
@@ -1342,7 +2507,15 @@ useLayoutEffect(() => {
                         }}
                         aria-label={`จัดการฟาร์ม ${farm.name}`}
                       >
-                        <span className="farm-card-icon" aria-hidden="true">⌂</span>
+                        {farmImageUrls[farm.id] ? (
+                          <img
+                            className="farm-card-image"
+                            src={farmImageUrls[farm.id]}
+                            alt={`รูปฟาร์ม ${farm.name}`}
+                          />
+                        ) : (
+                          <span className="farm-card-icon" aria-hidden="true">⌂</span>
+                        )}
                         <div className="farm-card-main">
                           <h3>{farm.name}</h3>
                           <p>
@@ -1381,8 +2554,23 @@ useLayoutEffect(() => {
                         if (farmSaving || !selectedFarm || !tenantId) return;
                         const name = farmName.trim();
                         const timezone = farmTimezone.trim();
+                        const latitudeText = farmLatitude.trim();
+                        const longitudeText = farmLongitude.trim();
                         if (!name || !timezone) {
                           setFarmActionError("กรุณากรอกชื่อฟาร์มและเขตเวลา");
+                          return;
+                        }
+                        if (Boolean(latitudeText) !== Boolean(longitudeText)) {
+                          setFarmActionError("กรุณากรอก Latitude และ Longitude ให้ครบทั้งคู่ หรือเว้นว่างทั้งคู่");
+                          return;
+                        }
+                        const latitude = latitudeText === "" ? null : Number(latitudeText);
+                        const longitude = longitudeText === "" ? null : Number(longitudeText);
+                        if (
+                          (latitude !== null && (!Number.isFinite(latitude) || latitude < -90 || latitude > 90)) ||
+                          (longitude !== null && (!Number.isFinite(longitude) || longitude < -180 || longitude > 180))
+                        ) {
+                          setFarmActionError("พิกัดไม่ถูกต้อง: Latitude ต้องอยู่ระหว่าง -90 ถึง 90 และ Longitude ระหว่าง -180 ถึง 180");
                           return;
                         }
                         setFarmSaving(true);
@@ -1392,7 +2580,7 @@ useLayoutEffect(() => {
                           const updated = await farmApi.update(
                             tenantId,
                             selectedFarm.id,
-                            { name, timezone },
+                            { name, timezone, latitude, longitude },
                           );
                           setSelectedFarm({ ...updated, displayId: selectedFarm.displayId });
                           setFarmFormMode(null);
@@ -1430,6 +2618,31 @@ useLayoutEffect(() => {
                         <option value="Europe/London">Europe/London</option>
                         <option value="America/New_York">America/New_York</option>
                       </select>
+                      <label htmlFor="farm-edit-latitude">Latitude (ละติจูด)</label>
+                      <input
+                        id="farm-edit-latitude"
+                        type="number"
+                        step="any"
+                        min="-90"
+                        max="90"
+                        value={farmLatitude}
+                        onChange={(event) => setFarmLatitude(event.target.value)}
+                        disabled={farmSaving}
+                        placeholder="เช่น 13.7563"
+                      />
+                      <label htmlFor="farm-edit-longitude">Longitude (ลองจิจูด)</label>
+                      <input
+                        id="farm-edit-longitude"
+                        type="number"
+                        step="any"
+                        min="-180"
+                        max="180"
+                        value={farmLongitude}
+                        onChange={(event) => setFarmLongitude(event.target.value)}
+                        disabled={farmSaving}
+                        placeholder="เช่น 100.5018"
+                      />
+                      <p className="farm-helper-text">พิกัดนี้ใช้เลือกตำแหน่งสภาพอากาศของฟาร์ม หากลบพิกัดทั้งสองช่อง ระบบจะหยุดแสดงสภาพอากาศของฟาร์มนี้</p>
                       {farmActionError && <p className="farm-message-error" role="alert">{farmActionError}</p>}
                       <div className="farm-crud-actions">
                         <button className="primary-button" type="submit" disabled={farmSaving}>
@@ -1453,6 +2666,80 @@ useLayoutEffect(() => {
                   )}
                   {farmActionMessage && <div className="farm-message" role="status">{farmActionMessage}</div>}
                   {farmActionError && farmFormMode !== "edit" && <div className="farm-message farm-message-error" role="alert">{farmActionError}</div>}
+
+                  <section className="farm-image-section" aria-label="รูปภาพฟาร์ม">
+                    <div className="farm-image-preview">
+                      {farmImageUrls[selectedFarm.id] ? (
+                        <img
+                          src={farmImageUrls[selectedFarm.id]}
+                          alt={`รูปฟาร์ม ${selectedFarm.name}`}
+                        />
+                      ) : (
+                        <div className="farm-image-placeholder" aria-hidden="true">⌂</div>
+                      )}
+                    </div>
+                    <div className="farm-image-controls">
+                      <strong>รูปภาพฟาร์ม</strong>
+                      <p>รองรับ JPEG, PNG และ WebP ขนาดไม่เกิน 5 MB</p>
+                      {canManageFarms && (
+                        <label className="farm-image-upload-button">
+                          {farmImageBusy ? "กำลังอัปโหลด…" : "อัปโหลด / เปลี่ยนรูป"}
+                          <input
+                            type="file"
+                            accept="image/jpeg,image/png,image/webp"
+                            disabled={farmImageBusy || farmSaving}
+                            onChange={async (event) => {
+                              const input = event.currentTarget;
+                              const file = input.files?.[0];
+                              if (!file) return;
+
+                              setFarmImageError("");
+                              setFarmActionMessage("");
+
+                              const allowedTypes = [
+                                "image/jpeg",
+                                "image/png",
+                                "image/webp",
+                              ];
+                              if (!allowedTypes.includes(file.type)) {
+                                setFarmImageError("ไฟล์ต้องเป็น JPEG, PNG หรือ WebP");
+                                input.value = "";
+                                return;
+                              }
+                              if (file.size > 5 * 1024 * 1024) {
+                                setFarmImageError("ขนาดรูปต้องไม่เกิน 5 MB");
+                                input.value = "";
+                                return;
+                              }
+
+                              setFarmImageBusy(true);
+                              try {
+                                await farmApi.uploadImage(
+                                  tenantId,
+                                  selectedFarm.id,
+                                  file,
+                                );
+                                setFarmImageReloadKey((key) => key + 1);
+                                setFarmActionMessage("อัปโหลดรูปฟาร์มสำเร็จ");
+                              } catch (error) {
+                                setFarmImageError(
+                                  error instanceof Error
+                                    ? error.message
+                                    : "อัปโหลดรูปฟาร์มไม่สำเร็จ",
+                                );
+                              } finally {
+                                setFarmImageBusy(false);
+                                input.value = "";
+                              }
+                            }}
+                          />
+                        </label>
+                      )}
+                      {farmImageError && (
+                        <p className="farm-image-error" role="alert">{farmImageError}</p>
+                      )}
+                    </div>
+                  </section>
 
                   <div className="farm-detail-grid">
                     <div className="farm-detail-item">
@@ -1547,6 +2834,8 @@ useLayoutEffect(() => {
                           onClick={() => {
                             setFarmName(selectedFarm.name);
                             setFarmTimezone(selectedFarm.timezone);
+                            setFarmLatitude(selectedFarm.latitude === null ? "" : String(selectedFarm.latitude));
+                            setFarmLongitude(selectedFarm.longitude === null ? "" : String(selectedFarm.longitude));
                             setFarmActionError("");
                             setFarmActionMessage("");
                             setFarmFormMode("edit");
@@ -1645,7 +2934,15 @@ useLayoutEffect(() => {
 
                 <div className="zone-context-panel">
                   <div className="zone-context-main">
-                    <span className="zone-context-icon" aria-hidden="true">⌂</span>
+                    {selectedFarm && farmImageUrls[selectedFarm.id] ? (
+                      <img
+                        className="zone-context-image"
+                        src={farmImageUrls[selectedFarm.id]}
+                        alt={`รูปฟาร์ม ${selectedFarm.name}`}
+                      />
+                    ) : (
+                      <span className="zone-context-icon" aria-hidden="true">⌂</span>
+                    )}
                     <div>
                       <span className="zone-context-label">ฟาร์มที่เลือก</span>
                       <strong>{selectedFarm?.name ?? "ยังไม่ได้เลือกฟาร์ม"}</strong>
@@ -2074,6 +3371,170 @@ useLayoutEffect(() => {
                   )}
                 </div>
 
+                {canManageFarms && deviceFormMode && (
+                  <div className="sf-modal-backdrop" role="presentation">
+                    <div className="sf-modal" role="dialog" aria-modal="true" aria-labelledby="device-crud-modal-title">
+                      <form
+                        className="farm-crud-form"
+                        onSubmit={async (event) => {
+                          event.preventDefault();
+                          if (deviceFormSaving || !authorizedDeviceTenant) return;
+
+                          if (!["owner", "operator"].includes(authorizedDeviceTenant.role)) {
+                            setDeviceFormError("บัญชีนี้ไม่มีสิทธิ์จัดการอุปกรณ์");
+                            return;
+                          }
+
+                          const type = deviceFormType.trim();
+                          const name = deviceFormName.trim();
+
+                          if (!type || !name || !deviceFormFarmId) {
+                            setDeviceFormError("กรุณากรอกชนิด ชื่อ และเลือกฟาร์มให้ครบ");
+                            return;
+                          }
+
+                          if (!farms.some((farm) => farm.id === deviceFormFarmId)) {
+                            setDeviceFormError("ไม่พบฟาร์มที่เลือกในรายการฟาร์มของระบบ");
+                            return;
+                          }
+
+                          setDeviceFormSaving(true);
+                          setDeviceFormError("");
+
+                          try {
+                            if (deviceFormMode === "create") {
+                              await deviceApi.create(authorizedDeviceTenant.id, {
+                                device_type: type,
+                                name,
+                                farm_id: deviceFormFarmId,
+                                status: deviceFormStatus,
+                              });
+                            } else if (deviceEditing) {
+                              await deviceApi.update(
+                                authorizedDeviceTenant.id,
+                                deviceEditing.id,
+                                {
+                                  device_type: type,
+                                  name,
+                                  farm_id: deviceFormFarmId,
+                                  status: deviceFormStatus,
+                                },
+                              );
+                            } else {
+                              throw new Error("ไม่พบอุปกรณ์ที่ต้องการแก้ไข");
+                            }
+
+                            if (deviceFormMode === "create") {
+                              setSelectedDeviceZone(null);
+                            }
+
+                            setDeviceFormMode(null);
+                            setDeviceEditing(null);
+                            setDeviceFormCode("");
+                            setDeviceFormType("");
+                            setDeviceFormName("");
+                            setDeviceFormFarmId("");
+                            setDeviceFormStatus("pending");
+                            setDevicesReloadKey((key) => key + 1);
+                          } catch (error) {
+                            setDeviceFormError(
+                              error instanceof Error ? error.message : "บันทึกข้อมูลอุปกรณ์ไม่สำเร็จ",
+                            );
+                          } finally {
+                            setDeviceFormSaving(false);
+                          }
+                        }}
+                      >
+                        <div className="sf-modal-header">
+                          <h3 id="device-crud-modal-title">
+                            {deviceFormMode === "create" ? "เพิ่มอุปกรณ์" : "แก้ไขข้อมูลอุปกรณ์"}
+                          </h3>
+                          <button
+                            className="secondary-button"
+                            type="button"
+                            disabled={deviceFormSaving}
+                            onClick={() => {
+                              setDeviceFormMode(null);
+                              setDeviceEditing(null);
+                              setDeviceFormError("");
+                            }}
+                          >
+                            ปิด
+                          </button>
+                        </div>
+
+                        {deviceFormError && (
+                          <div className="farm-message farm-message-error" role="alert">
+                            {deviceFormError}
+                          </div>
+                        )}
+
+                        <label htmlFor="device-crud-name">ชื่ออุปกรณ์</label>
+                        <input
+                          id="device-crud-name"
+                          value={deviceFormName}
+                          onChange={(event) => setDeviceFormName(event.target.value)}
+                          maxLength={160}
+                          required
+                          disabled={deviceFormSaving}
+                          placeholder="เช่น ตัวควบคุมโรงเรือน 1"
+                        />
+
+                        <label htmlFor="device-crud-type">ชนิดอุปกรณ์</label>
+                        <input
+                          id="device-crud-type"
+                          value={deviceFormType}
+                          onChange={(event) => setDeviceFormType(event.target.value)}
+                          maxLength={64}
+                          required
+                          disabled={deviceFormSaving}
+                          placeholder="เช่น esp32, relay_controller"
+                        />
+
+                        <label htmlFor="device-crud-farm">ฟาร์ม</label>
+                        <select
+                          id="device-crud-farm"
+                          value={deviceFormFarmId}
+                          onChange={(event) => setDeviceFormFarmId(event.target.value)}
+                          required
+                          disabled={deviceFormSaving || farmsLoading}
+                        >
+                          <option value="">เลือกฟาร์ม</option>
+                          {farms.map((farm) => (
+                            <option key={farm.id} value={farm.id}>{farm.name}</option>
+                          ))}
+                        </select>
+                        {farmsError && (
+                          <p className="farm-helper-text" role="alert">
+                            โหลดรายการฟาร์มไม่สำเร็จ: {farmsError}
+                          </p>
+                        )}
+
+                        <label htmlFor="device-crud-status">สถานะ</label>
+                        <select
+                          id="device-crud-status"
+                          value={deviceFormStatus}
+                          onChange={(event) => setDeviceFormStatus(event.target.value as typeof deviceFormStatus)}
+                          disabled={deviceFormSaving}
+                        >
+                          <option value="pending">รอเปิดใช้งาน</option>
+                          <option value="active">เปิดใช้งาน</option>
+                          <option value="disabled">ปิดใช้งาน</option>
+                          <option value="revoked">เพิกถอนแล้ว</option>
+                        </select>
+
+                        <button
+                          className="primary-button"
+                          type="submit"
+                          disabled={deviceFormSaving || farmsLoading || farms.length === 0}
+                        >
+                          {deviceFormSaving ? "กำลังบันทึก…" : "บันทึกอุปกรณ์"}
+                        </button>
+                      </form>
+                    </div>
+                  </div>
+                )}
+
                 {selectedDeviceZone && (
                   <div className="device-tenant-context">
                     <p>
@@ -2083,8 +3544,8 @@ useLayoutEffect(() => {
                       className="secondary-button"
                       type="button"
                       disabled={devicesLoading || !authorizedDeviceTenant}
-                      onClick={() => setDevicesReloadKey((key) => key + 1)}
-                    >โหลดอุปกรณ์ทั้งหมดในโซนนี้</button>
+                      onClick={() => setSelectedDeviceZone(null)}
+                    >แสดงอุปกรณ์ทั้งหมดในฟาร์ม</button>
                   </div>
                 )}
 
@@ -2094,6 +3555,29 @@ useLayoutEffect(() => {
                       ? `${(selectedFarm ? devices.filter((device) => device.farm_id === selectedFarm.id) : []).filter((device) => !selectedDeviceZone || (device.zone_id === selectedDeviceZone.id && device.farm_id === selectedDeviceZone.farmId)).length} อุปกรณ์`
                       : "รายการอุปกรณ์"}
                   </span>
+                  {canManageFarms && authorizedDeviceTenant && (
+                    <button
+                      className="primary-button"
+                      type="button"
+                      disabled={deviceFormSaving || farmsLoading || farms.length === 0}
+                      onClick={() => {
+                        setDeviceEditing(null);
+                        setDeviceFormMode("create");
+                        setDeviceFormCode("");
+                        setDeviceFormType("");
+                        setDeviceFormName("");
+                        setDeviceFormFarmId(
+                          selectedFarm && farms.some((farm) => farm.id === selectedFarm.id)
+                            ? selectedFarm.id
+                            : farms[0]?.id ?? "",
+                        );
+                        setDeviceFormStatus("pending");
+                        setDeviceFormError("");
+                      }}
+                    >
+                      เพิ่มอุปกรณ์
+                    </button>
+                  )}
                   <button
                     className="secondary-button"
                     type="button"
@@ -2177,6 +3661,31 @@ useLayoutEffect(() => {
                             <span className={`device-status device-status-${device.status}`}>
                               {statusLabels[device.status] ?? device.status}
                             </span>
+                            {canManageFarms && (
+                              <button
+                                className="secondary-button"
+                                type="button"
+                                disabled={deviceFormSaving}
+                                onClick={() => {
+                                  setDeviceEditing(device);
+                                  setDeviceFormMode("edit");
+                                  setDeviceFormCode(device.device_code);
+                                  setDeviceFormType(device.device_type);
+                                  setDeviceFormName(device.name);
+                                  setDeviceFormFarmId(device.farm_id ?? "");
+                                  setDeviceFormStatus(
+                                    device.status === "active" ||
+                                    device.status === "disabled" ||
+                                    device.status === "revoked"
+                                      ? device.status
+                                      : "pending",
+                                  );
+                                  setDeviceFormError("");
+                                }}
+                              >
+                                แก้ไข
+                              </button>
+                            )}
                           </div>
                           <dl className="device-card-details">
                             <div>
@@ -2239,6 +3748,8 @@ useLayoutEffect(() => {
                                     .filter((reading) => reading.device_id === device.id)
                                     .map((reading) => {
                                       const metricLabels: Record<string, string> = {
+                                        temperature: "อุณหภูมิอากาศ",
+                                        humidity: "ความชื้นอากาศ",
                                         air_temperature: "อุณหภูมิอากาศ",
                                         air_humidity: "ความชื้นอากาศ",
                                         soil_moisture: "ความชื้นดิน",
@@ -2374,6 +3885,25 @@ useLayoutEffect(() => {
                               <p className="device-zone-error" role="alert">{deviceZoneErrors[device.id]}</p>
                             )}
                           </section>
+                          {canManageFarms && (
+                            <button
+                              type="button"
+                              className="secondary-button"
+                              onClick={() => {
+                                setSelectedSensorDeviceId(device.id);
+                                setSensorFormDeviceId(device.id);
+                                setSensorFormMode("create");
+                                setSensorEditing(null);
+                                setSensorFormType("");
+                                setSensorFormUnit("");
+                                setSensorFormStatus("active");
+                                setSensorFormError("");
+                                setSelectedPage("sensors");
+                              }}
+                            >
+                              เพิ่ม Sensor ในอุปกรณ์นี้
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="secondary-button relay-panel-toggle"
@@ -2812,6 +4342,270 @@ useLayoutEffect(() => {
 
               </section>
             </div>
+
+          ) : selectedPage === "sensors" ? (
+            <section className="section-block device-management-panel">
+              <div className="device-list-toolbar">
+                <div>
+                  <h2>Sensor Management</h2>
+                  <p className="farm-helper-text">จัดการเซนเซอร์ภายในอุปกรณ์</p>
+                </div>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={sensorsLoading}
+                  onClick={() => setSensorReloadKey((v) => v + 1)}
+                >
+                  รีเฟรช
+                </button>
+              </div>
+
+              {sensorsError && <p role="alert" className="farm-message">{sensorsError}</p>}
+
+              <label htmlFor="sensor-device-filter">กรองตามอุปกรณ์</label>
+              <select
+                id="sensor-device-filter"
+                value={selectedSensorDeviceId}
+                onChange={(e) => setSelectedSensorDeviceId(e.target.value)}
+              >
+                <option value="">อุปกรณ์ทั้งหมด</option>
+                {sensorDevices.map((device) => (
+                  <option key={device.id} value={device.id}>
+                    {device.name} ({device.device_code})
+                  </option>
+                ))}
+              </select>
+
+              {authorizedDeviceTenant &&
+                ["owner", "operator"].includes(authorizedDeviceTenant.role) && (
+                <form
+                  className="farm-crud-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (sensorSaving || !authorizedDeviceTenant) return;
+
+                    const deviceId = sensorFormMode === "edit"
+                      ? sensorEditing?.device_id
+                      : sensorFormDeviceId;
+
+                    if (!deviceId) {
+                      setSensorFormError("กรุณาเลือกอุปกรณ์");
+                      return;
+                    }
+
+                    setSensorSaving(true);
+                    setSensorFormError("");
+
+                    void (async () => {
+                      try {
+                        if (sensorFormMode === "edit" && sensorEditing) {
+                          await sensorApi.update(
+                            authorizedDeviceTenant.id,
+                            deviceId,
+                            sensorEditing.id,
+                            {
+                              measurement_type: sensorFormType.trim(),
+                              unit: sensorFormUnit.trim(),
+                              status: sensorFormStatus,
+                            },
+                          );
+                        } else {
+                          await sensorApi.create(
+                            authorizedDeviceTenant.id,
+                            deviceId,
+                            {
+                              measurement_type: sensorFormType.trim(),
+                              unit: sensorFormUnit.trim(),
+                            },
+                          );
+                        }
+
+                        setSensorFormMode(null);
+                        setSensorEditing(null);
+                        setSensorFormType("");
+                        setSensorFormUnit("");
+                        setSensorFormStatus("active");
+                        setSensorReloadKey((v) => v + 1);
+                      } catch (error) {
+                        setSensorFormError(
+                          error instanceof Error ? error.message : "บันทึกไม่สำเร็จ",
+                        );
+                      } finally {
+                        setSensorSaving(false);
+                      }
+                    })();
+                  }}
+                >
+                  <h3>{sensorFormMode === "edit" ? "แก้ไข Sensor" : "เพิ่ม Sensor"}</h3>
+
+                  {sensorFormMode !== "edit" && (
+                    <>
+                      <label htmlFor="sensor-device">อุปกรณ์</label>
+                      <select
+                        id="sensor-device"
+                        value={sensorFormDeviceId}
+                        onChange={(e) => setSensorFormDeviceId(e.target.value)}
+                        required
+                      >
+                        <option value="">เลือกอุปกรณ์</option>
+                        {sensorDevices.map((device) => (
+                          <option key={device.id} value={device.id}>
+                            {device.name} ({device.device_code})
+                          </option>
+                        ))}
+                      </select>
+
+                    </>
+                  )}
+
+                  <label htmlFor="sensor-type">Measurement Type</label>
+                  <select
+                    id="sensor-type"
+                    value={sensorFormType}
+                    onChange={(e) => {
+                      const selected = SENSOR_MEASUREMENT_OPTIONS.find(
+                        (option) => option.value === e.target.value,
+                      );
+                      setSensorFormType(e.target.value);
+                      if (selected) setSensorFormUnit(selected.defaultUnit);
+                    }}
+                    required
+                  >
+                    <option value="">เลือกประเภทเซนเซอร์</option>
+                    {SENSOR_MEASUREMENT_GROUPS.map((group) => (
+                      <optgroup key={group.label} label={group.label}>
+                        {group.options.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label} ({option.value})
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                    {sensorFormType &&
+                      !SENSOR_MEASUREMENT_OPTIONS.some(
+                        (option) => option.value === sensorFormType,
+                      ) && (
+                        <option value={sensorFormType}>
+                          ประเภทเดิม ({sensorFormType})
+                        </option>
+                      )}
+                  </select>
+
+                  <label htmlFor="sensor-unit">Unit</label>
+                  <select
+                    id="sensor-unit"
+                    value={sensorFormUnit}
+                    onChange={(e) => setSensorFormUnit(e.target.value)}
+                    disabled={!sensorFormType}
+                    required
+                  >
+                    <option value="">เลือกหน่วย</option>
+                    {SENSOR_MEASUREMENT_OPTIONS
+                      .find((option) => option.value === sensorFormType)
+                      ?.units.map((unit) => (
+                        <option key={unit} value={unit}>
+                          {unit}
+                        </option>
+                      ))}
+                    {sensorFormUnit &&
+                      !SENSOR_MEASUREMENT_OPTIONS.some(
+                        (option) =>
+                          option.value === sensorFormType &&
+                          option.units.some((unit) => unit === sensorFormUnit),
+                      ) && (
+                        <option value={sensorFormUnit}>
+                          หน่วยเดิม ({sensorFormUnit})
+                        </option>
+                      )}
+                  </select>
+
+                  {sensorFormMode === "edit" && (
+                    <>
+                      <label htmlFor="sensor-status">สถานะ</label>
+                      <select
+                        id="sensor-status"
+                        value={sensorFormStatus}
+                        onChange={(e) => setSensorFormStatus(e.target.value as SensorStatus)}
+                      >
+                        <option value="active">Active</option>
+                        <option value="disabled">Disabled</option>
+                        <option value="retired">Retired</option>
+                      </select>
+                    </>
+                  )}
+
+                  {sensorFormError && <p role="alert">{sensorFormError}</p>}
+
+                  <button type="submit" disabled={sensorSaving}>
+                    {sensorSaving ? "กำลังบันทึก..." : "บันทึก"}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => {
+                      setSensorFormMode(null);
+                      setSensorEditing(null);
+                      setSensorFormError("");
+                    }}
+                  >
+                    ยกเลิก
+                  </button>
+                </form>
+              )}
+
+              {sensorsLoading ? (
+                <p className="farm-list-empty">กำลังโหลด Sensor...</p>
+              ) : (
+                <div className="device-list">
+                  {sensors
+                    .filter((sensor) =>
+                      !selectedSensorDeviceId || sensor.device_id === selectedSensorDeviceId
+                    )
+                    .map((sensor) => {
+                      const device = sensorDevices.find((d) => d.id === sensor.device_id);
+                      return (
+                        <article className="device-card" key={sensor.id}>
+                          <div className="device-card-heading">
+                            <div>
+                              <h3>{sensor.sensor_code}</h3>
+                              <p>{device?.name ?? sensor.device_id}</p>
+                            </div>
+                            <span>{sensor.status}</span>
+                          </div>
+                          <div className="device-card-details">
+                            <p>Measurement: {sensor.measurement_type}</p>
+                            <p>Unit: {sensor.unit}</p>
+                            <p>Created: {new Date(sensor.created_at).toLocaleString("th-TH")}</p>
+                          </div>
+                          {authorizedDeviceTenant &&
+                            ["owner", "operator"].includes(authorizedDeviceTenant.role) &&
+                            sensor.status !== "retired" && (
+                            <button
+                              className="secondary-button"
+                              type="button"
+                              onClick={() => {
+                                setSensorEditing(sensor);
+                                setSensorFormMode("edit");
+                                setSensorFormType(sensor.measurement_type);
+                                setSensorFormUnit(sensor.unit);
+                                setSensorFormStatus(sensor.status);
+                                setSensorFormError("");
+                              }}
+                            >
+                              แก้ไข
+                            </button>
+                          )}
+                        </article>
+                      );
+                    })}
+                  {sensors.filter((sensor) =>
+                    !selectedSensorDeviceId || sensor.device_id === selectedSensorDeviceId
+                  ).length === 0 && (
+                    <p className="farm-list-empty">ไม่พบ Sensor ในอุปกรณ์ที่เลือก</p>
+                  )}
+                </div>
+              )}
+            </section>
           ) : (
             <section className="section-block destination-panel">
               <div className="destination-icon" aria-hidden="true">

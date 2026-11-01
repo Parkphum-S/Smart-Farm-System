@@ -44,7 +44,7 @@ class DeviceCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    device_code: str = Field(min_length=1, max_length=100)
+    device_code: str | None = Field(default=None, min_length=1, max_length=100)
     device_type: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=160)
     farm_id: UUID | None = None

@@ -111,7 +111,10 @@ def create_device(
 ) -> DeviceResponse:
     """Register a device without creating or exposing device credentials."""
     values = payload.model_dump()
-    values["device_code"] = values["device_code"].strip()
+    if values["device_code"] is None:
+        values["device_code"] = f"DEV-{uuid4().hex[:12].upper()}"
+    else:
+        values["device_code"] = values["device_code"].strip()
     values["device_type"] = values["device_type"].strip()
     values["name"] = values["name"].strip()
     for key in ("platform", "protocol", "vendor"):

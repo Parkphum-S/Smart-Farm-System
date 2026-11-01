@@ -26,6 +26,8 @@ FARM_ROW = {
     "id": FARM_ID,
     "name": "North Farm",
     "timezone": "Asia/Bangkok",
+    "latitude": None,
+    "longitude": None,
     "created_at": CREATED_AT,
     "updated_at": CREATED_AT,
 }
@@ -114,6 +116,8 @@ def test_allowed_tenant_roles_can_list_farms(
             "id": str(FARM_ID),
             "name": "North Farm",
             "timezone": "Asia/Bangkok",
+            "latitude": None,
+            "longitude": None,
             "created_at": "2026-10-01T00:00:00Z",
             "updated_at": "2026-10-01T00:00:00Z",
         }
@@ -184,6 +188,8 @@ def test_create_farm_returns_created_resource(farm_client):
     assert params["tenant_id"] == TENANT_ID
     assert params["name"] == "North Farm"
     assert params["timezone"] == "Asia/Bangkok"
+    assert params["latitude"] is None
+    assert params["longitude"] is None
 
 
 def test_create_farm_trims_name_and_defaults_timezone(farm_client):
@@ -211,6 +217,9 @@ def test_create_farm_trims_name_and_defaults_timezone(farm_client):
         {"name": "   "},
         {"name": "Farm", "timezone": "Not/A_Real_Timezone"},
         {"name": "Farm", "unexpected": "field"},
+        {"name": "Farm", "latitude": 13.7},
+        {"name": "Farm", "latitude": 91, "longitude": 100},
+        {"name": "Farm", "latitude": 13.7, "longitude": 181},
     ],
 )
 def test_create_farm_rejects_invalid_payload(farm_client, payload):
@@ -247,7 +256,10 @@ def test_update_farm_returns_updated_resource(farm_client):
     assert params["name"] == "Updated Farm"
 
 
-@pytest.mark.parametrize("payload", [{}, {"name": None}, {"timezone": None}])
+@pytest.mark.parametrize("payload", [
+    {}, {"name": None}, {"timezone": None},
+    {"latitude": 13.7}, {"longitude": 100.5},
+])
 def test_update_farm_rejects_empty_or_null_fields(farm_client, payload):
     db, request = farm_client
 
@@ -257,6 +269,55 @@ def test_update_farm_rejects_empty_or_null_fields(farm_client, payload):
 
     assert response.status_code == 422
     db.execute.assert_not_called()
+
+
+def test_create_farm_accepts_coordinate_pair(farm_client):
+    db, request = farm_client
+    db.execute.return_value.mappings.return_value.one.return_value = {
+        **FARM_ROW, "latitude": 13.7563, "longitude": 100.5018
+    }
+    response = asyncio.run(request(
+        method="POST",
+        json={
+            "name": "Bangkok Farm",
+            "latitude": 13.7563,
+            "longitude": 100.5018,
+        },
+    ))
+    assert response.status_code == 201, response.text
+    params = db.execute.call_args.args[1]
+    assert params["latitude"] == 13.7563
+    assert params["longitude"] == 100.5018
+
+
+def test_update_farm_accepts_coordinate_pair(farm_client):
+    db, request = farm_client
+    db.execute.return_value.mappings.return_value.first.return_value = {
+        **FARM_ROW, "latitude": 13.7, "longitude": 100.5
+    }
+    response = asyncio.run(request(
+        method="PATCH",
+        farm_id=FARM_ID,
+        json={"latitude": 13.7, "longitude": 100.5},
+    ))
+    assert response.status_code == 200, response.text
+    params = db.execute.call_args.args[1]
+    assert params["latitude"] == 13.7
+    assert params["longitude"] == 100.5
+
+
+def test_update_farm_can_clear_both_coordinates(farm_client):
+    db, request = farm_client
+    db.execute.return_value.mappings.return_value.first.return_value = FARM_ROW
+    response = asyncio.run(request(
+        method="PATCH",
+        farm_id=FARM_ID,
+        json={"latitude": None, "longitude": None},
+    ))
+    assert response.status_code == 200, response.text
+    params = db.execute.call_args.args[1]
+    assert params["latitude"] is None
+    assert params["longitude"] is None
 
 
 def test_update_farm_missing_resource_returns_404(farm_client):

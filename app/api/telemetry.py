@@ -72,6 +72,32 @@ def submit_telemetry(
 
             result = ingest_telemetry(db, identity, event)
 
+            updated_device = db.execute(
+                text("""
+                    UPDATE devices AS d
+                    SET last_seen_at = statement_timestamp()
+                    WHERE d.id = :device_id
+                      AND d.tenant_id = :tenant_id
+                      AND d.status = 'active'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM tenants AS t
+                          WHERE t.id = d.tenant_id
+                            AND t.status = 'active'
+                      )
+                    RETURNING d.id
+                """),
+                {
+                    "device_id": identity.device_id,
+                    "tenant_id": identity.tenant_id,
+                },
+            ).scalar_one_or_none()
+
+            if updated_device is None:
+                raise TelemetryRejected(
+                    "Device or tenant is no longer active"
+                )
+
     except TelemetryRejected:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

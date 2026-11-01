@@ -71,11 +71,15 @@ def postgres_engines():
                     f"database={database!r}, role={role!r}"
                 )
 
-            revision = conn.execute(
+            revisions = set(conn.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one()
-            if revision != "0008_device_zone_assignment":
-                pytest.fail(f"Unexpected test migration: {revision!r}")
+            ).scalars().all())
+            expected_revisions = {
+                "0013_zigbee_device_registrations",
+                "0015_farm_weather_coordinates",
+            }
+            if revisions != expected_revisions:
+                pytest.fail(f"Unexpected test migrations: {revisions!r}")
 
         yield app_engine, owner_engine
     finally:

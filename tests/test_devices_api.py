@@ -476,6 +476,39 @@ def test_create_device_returns_created_resource(device_client):
     assert "CAST(:capabilities AS jsonb)" in sql
 
 
+def test_create_device_generates_code_when_omitted(device_client):
+    db, request = device_client
+    db.execute.return_value.mappings.return_value.one.side_effect = lambda: {
+        **DEVICE_ROW,
+        "device_code": db.execute.call_args.args[1]["device_code"],
+        "device_type": "gateway",
+        "name": "Auto Code Gateway",
+        "status": "pending",
+        "farm_id": None,
+        "zone_id": None,
+    }
+
+    response = asyncio.run(
+        request(
+            method="POST",
+            json={
+                "device_type": "gateway",
+                "name": "Auto Code Gateway",
+                "farm_id": None,
+                "status": "pending",
+            },
+        )
+    )
+
+    assert response.status_code == 201
+    generated_code = response.json()["device_code"]
+    assert generated_code.startswith("DEV-")
+    assert len(generated_code) == 16
+    assert generated_code[4:].isalnum()
+    assert generated_code[4:] == generated_code[4:].upper()
+    assert db.execute.call_args.args[1]["device_code"] == generated_code
+
+
 def test_create_device_rejects_blank_fields(device_client):
     db, request = device_client
 

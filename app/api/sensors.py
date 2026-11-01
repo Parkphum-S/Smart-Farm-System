@@ -46,6 +46,16 @@ def create_sensor(
     _role: Annotated[str, Depends(require_tenant_role("owner", "operator"))],
     db: Session = Depends(get_db),
 ) -> SensorResponse:
+    sensor_code = payload.sensor_code
+    if sensor_code is None:
+        prefixes = {
+            "temperature": "TEMP",
+            "humidity": "HUM",
+            "soil_moisture": "SOIL",
+        }
+        prefix = prefixes.get(payload.measurement_type, "SEN")
+        sensor_code = f"{prefix}-{uuid4().hex[:8].upper()}"
+
     try:
         with db.begin():
             device = db.execute(
@@ -75,7 +85,9 @@ def create_sensor(
                     "id": uuid4(),
                     "tenant_id": tenant_id,
                     "device_id": device_id,
-                    **payload.model_dump(),
+                    "sensor_code": sensor_code,
+                    "measurement_type": payload.measurement_type,
+                    "unit": payload.unit,
                 },
             ).mappings().one()
 

@@ -8,12 +8,19 @@ import httpx
 import pytest
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from app.db.session import get_db
 from app.main import app
 from app.security.user_auth import hash_password
+from app.integrations.zigbee.registration import (
+    ZigbeeRegistrationError,
+    register_device,
+    resolve_device_identity,
+    set_registration_status,
+)
 
 
 @pytest.fixture(scope="module")
@@ -34,14 +41,16 @@ def owner_engine():
             ).one()
             assert database == "smartfarm_test"
             assert role == "smartfarm_owner"
-            revision = conn.execute(
+            revisions = set(conn.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one()
-            assert revision in {
-                "0011_device_platform_integration",
-                "0012_sensor_registration",
+            ).scalars().all())
+            expected_revisions = {
                 "0013_zigbee_device_registrations",
+                "0015_farm_weather_coordinates",
             }
+            assert revisions == expected_revisions, (
+                f"Unexpected test migrations: {revisions!r}"
+            )
         yield engine
     finally:
         engine.dispose()
@@ -214,6 +223,13 @@ def device_records(owner_engine):
     yield records
 
     with owner_engine.begin() as conn:
+        conn.execute(
+            text(
+                "DELETE FROM zigbee_device_registrations "
+                "WHERE device_id = ANY(:ids)"
+            ),
+            {"ids": [device_a, device_no_farm, device_b]},
+        )
         conn.execute(
             text("DELETE FROM devices WHERE id = ANY(:ids)"),
             {"ids": [device_a, device_no_farm, device_b]},
@@ -418,10 +434,28 @@ def test_postgres_runtime_role_can_update_only_assignment_columns(
             text("SELECT has_column_privilege("
                  "current_user, 'public.devices', 'updated_at', 'UPDATE')")
         ).scalar_one()
-        assert not conn.execute(
-            text("SELECT has_column_privilege("
-                 "current_user, 'public.devices', 'farm_id', 'UPDATE')")
-        ).scalar_one()
+        # Migration 0010/0011 grant UPDATE only on explicitly editable columns.
+        for column in (
+            "farm_id", "device_type", "name", "status",
+            "platform", "protocol", "vendor", "capabilities",
+        ):
+            assert conn.execute(
+                text(
+                    "SELECT has_column_privilege("
+                    "current_user, 'public.devices', :column, 'UPDATE')"
+                ),
+                {"column": column},
+            ).scalar_one(), f"Expected UPDATE privilege on {column}"
+
+        for column in ("platform", "protocol", "vendor", "capabilities"):
+            assert conn.execute(
+                text(
+                    "SELECT has_column_privilege("
+                    "current_user, 'public.devices', :column, 'INSERT')"
+                ),
+                {"column": column},
+            ).scalar_one(), f"Expected INSERT privilege on {column}"
+
         assert not conn.execute(
             text("SELECT has_column_privilege("
                  "current_user, 'public.devices', 'tenant_id', 'UPDATE')")
@@ -432,19 +466,34 @@ def test_postgres_zone_fk_restricts_cross_farm_assignment(
     owner_engine, device_records
 ):
     with owner_engine.begin() as conn:
-        with pytest.raises(Exception):
-            conn.execute(
-                text("""
-                    UPDATE devices
-                    SET zone_id = :zone_b
-                    WHERE id = :device_a
-                """),
-                {
-                    "zone_b": device_records["zone_b"],
-                    "device_a": device_records["device_a"],
-                },
-            )
+        with pytest.raises(IntegrityError) as exc_info:
+            with conn.begin_nested():
+                conn.execute(
+                    text("""
+                        UPDATE devices
+                        SET zone_id = :zone_b
+                        WHERE id = :device_a
+                    """),
+                    {
+                        "zone_b": device_records["zone_b"],
+                        "device_a": device_records["device_a"],
+                    },
+                )
 
+        original = exc_info.value.orig
+        sqlstate = (
+            getattr(original, "sqlstate", None)
+            or getattr(original, "pgcode", None)
+        )
+        assert sqlstate == "23503", (
+            f"Expected foreign_key_violation (23503), got {sqlstate}: "
+            f"{original}"
+        )
+
+        diagnostic = getattr(original, "diag", None)
+        constraint_name = getattr(diagnostic, "constraint_name", None)
+        if constraint_name is not None:
+            assert constraint_name == "fk_devices_tenant_farm_zone"
 
 def test_postgres_create_device(http_client, device_records, owner_engine):
     headers = login(http_client, device_records)
@@ -723,3 +772,190 @@ def test_postgres_update_missing_device_returns_404(
     )
 
     assert response.status_code == 404, response.text
+
+def test_postgres_zigbee_registration_round_trip(
+    app_engine, device_records
+):
+    """Runtime role can register, resolve and disable Zigbee identity."""
+    session_factory = sessionmaker(
+        bind=app_engine,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+
+    tenant_id = device_records["tenant_a"]
+    device_id = device_records["device_a"]
+    registration_id = uuid4()
+    ieee_address = uuid4().hex[:16]
+
+    with session_factory.begin() as db:
+        created_id = register_device(
+            db,
+            tenant_id=tenant_id,
+            device_id=device_id,
+            ieee_address=ieee_address,
+            registration_id=registration_id,
+        )
+
+    assert created_id == registration_id
+
+    with session_factory.begin() as db:
+        identity = resolve_device_identity(
+            db,
+            ieee_address=ieee_address,
+        )
+
+    assert identity.tenant_id == tenant_id
+    assert identity.device_id == device_id
+
+    with session_factory.begin() as db:
+        disabled_id = set_registration_status(
+            db,
+            tenant_id=tenant_id,
+            registration_id=registration_id,
+            status="disabled",
+        )
+
+    assert disabled_id == registration_id
+
+    with session_factory.begin() as db:
+        with pytest.raises(ZigbeeRegistrationError):
+            resolve_device_identity(
+                db,
+                ieee_address=ieee_address,
+            )
+
+def test_postgres_sensor_registration_with_runtime_role(
+    http_client, device_records, owner_engine
+):
+    headers = login(http_client, device_records)
+    tenant_id = device_records["tenant_a"]
+    device_id = device_records["device_a"]
+    url = (
+        f"/api/v1/tenants/{tenant_id}/devices/{device_id}/sensors"
+    )
+    sensor_id = None
+
+    try:
+        created = http_client.post(
+            url,
+            headers=headers,
+            json={
+                "sensor_code": f"pg-sensor-{uuid4().hex}",
+                "measurement_type": "temperature",
+                "unit": "C",
+            },
+        )
+        assert created.status_code == 201, created.text
+
+        sensor = created.json()
+        sensor_id = sensor["id"]
+        assert sensor["status"] == "active"
+        assert sensor["tenant_id"] == str(tenant_id)
+        assert sensor["device_id"] == str(device_id)
+
+        updated = http_client.patch(
+            f"{url}/{sensor_id}",
+            headers=headers,
+            json={
+                "measurement_type": "soil_moisture",
+                "unit": "%",
+                "status": "disabled",
+            },
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["measurement_type"] == "soil_moisture"
+        assert updated.json()["unit"] == "%"
+        assert updated.json()["status"] == "disabled"
+
+    finally:
+        if sensor_id is not None:
+            with owner_engine.begin() as conn:
+                conn.execute(
+                    text("DELETE FROM sensors WHERE id = :id"),
+                    {"id": sensor_id},
+                )
+
+
+def test_postgres_runtime_sensor_column_privileges(app_engine):
+    with app_engine.connect() as conn:
+        for column in (
+            "id", "tenant_id", "device_id", "sensor_code",
+            "measurement_type", "unit", "status",
+        ):
+            assert conn.execute(
+                text(
+                    "SELECT has_column_privilege("
+                    "current_user, 'public.sensors', :column, 'INSERT')"
+                ),
+                {"column": column},
+            ).scalar_one(), f"Expected INSERT privilege on sensors.{column}"
+
+        for column in ("measurement_type", "unit", "status"):
+            assert conn.execute(
+                text(
+                    "SELECT has_column_privilege("
+                    "current_user, 'public.sensors', :column, 'UPDATE')"
+                ),
+                {"column": column},
+            ).scalar_one(), f"Expected UPDATE privilege on sensors.{column}"
+
+        for column in ("tenant_id", "device_id", "sensor_code"):
+            assert not conn.execute(
+                text(
+                    "SELECT has_column_privilege("
+                    "current_user, 'public.sensors', :column, 'UPDATE')"
+                ),
+                {"column": column},
+            ).scalar_one(), f"Unexpected UPDATE privilege on sensors.{column}"
+
+        assert not conn.execute(
+            text(
+                "SELECT has_table_privilege("
+                "current_user, 'public.sensors', 'DELETE')"
+            )
+        ).scalar_one()
+
+        assert conn.execute(
+            text(
+                "SELECT has_table_privilege("
+                "current_user, 'public.sensor_endpoint_mappings', 'SELECT')"
+            )
+        ).scalar_one()
+
+        for column in (
+            "id", "tenant_id", "device_id", "sensor_id",
+            "adapter_type", "endpoint_key", "mapping_status",
+        ):
+            assert conn.execute(
+                text(
+                    "SELECT has_column_privilege("
+                    "current_user, 'public.sensor_endpoint_mappings', "
+                    ":column, 'INSERT')"
+                ),
+                {"column": column},
+            ).scalar_one(), (
+                f"Expected INSERT privilege on mappings.{column}"
+            )
+
+        for column in (
+            "sensor_id", "adapter_type", "endpoint_key",
+            "mapping_status", "updated_at",
+        ):
+            assert conn.execute(
+                text(
+                    "SELECT has_column_privilege("
+                    "current_user, 'public.sensor_endpoint_mappings', "
+                    ":column, 'UPDATE')"
+                ),
+                {"column": column},
+            ).scalar_one(), (
+                f"Expected UPDATE privilege on mappings.{column}"
+            )
+
+        assert not conn.execute(
+            text(
+                "SELECT has_table_privilege("
+                "current_user, 'public.sensor_endpoint_mappings', 'DELETE')"
+            )
+        ).scalar_one()

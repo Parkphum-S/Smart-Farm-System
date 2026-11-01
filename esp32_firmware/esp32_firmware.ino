@@ -2,6 +2,7 @@
 #include "CommandExpiryStatus.h"
 #include <HTTPClient.h>
 #include <time.h>
+#include <sys/time.h>
 #include <DHT.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -175,8 +176,12 @@ CommandExpiryStatus checkCommandExpiry(const String& iso) {
   parsed.tm_isdst = 0;
 
   // The device clock must be synchronized before expiry decisions.
-  const time_t now = time(nullptr);
-  if (now < 1700000000) return COMMAND_CLOCK_UNSYNCED;
+  struct timeval currentTime = {};
+  if (gettimeofday(&currentTime, nullptr) != 0 ||
+      currentTime.tv_sec < 1700000000) {
+    return COMMAND_CLOCK_UNSYNCED;
+  }
+  const time_t now = currentTime.tv_sec;
 
   const time_t localAsUtc = utcToEpoch(parsed);
   if (localAsUtc <= 0) return COMMAND_EXPIRED;
@@ -197,7 +202,21 @@ CommandExpiryStatus checkCommandExpiry(const String& iso) {
   const time_t expiry = localAsUtc - offsetSeconds;
   if (expiry <= 0) return COMMAND_EXPIRED;
 
-  return now >= expiry ? COMMAND_EXPIRED : COMMAND_NOT_EXPIRED;
+  // Preserve fractional seconds, right-padding to microsecond precision.
+  long expiryMicros = 0;
+  if (timestampEnd > 19) {
+    long scale = 100000;
+    for (int i = 20; i < timestampEnd; ++i) {
+      expiryMicros += (iso.charAt(i) - '0') * scale;
+      scale /= 10;
+    }
+  }
+
+  if (now > expiry ||
+      (now == expiry && currentTime.tv_usec >= expiryMicros)) {
+    return COMMAND_EXPIRED;
+  }
+  return COMMAND_NOT_EXPIRED;
 }
 
 

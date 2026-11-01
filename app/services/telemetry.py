@@ -94,6 +94,7 @@ def ingest_telemetry(
                   AND tenant_id = :tenant_id
                   AND device_id = :device_id
                   AND status = 'active'
+                FOR SHARE
             """),
             {
                 "sensor_id": sensor_id,

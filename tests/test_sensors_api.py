@@ -342,6 +342,38 @@ def test_create_sensor_success(sensor_client):
     assert insert_params["unit"] == "°C"
 
 
+
+def test_create_sensor_generates_code_when_omitted(sensor_client):
+    db, request = sensor_client
+
+    db.execute.side_effect = [
+        result(first=(DEVICE_ID,)),
+        result(one=SENSOR_ROW),
+    ]
+
+    response = asyncio.run(
+        request(
+            method="POST",
+            sensor_id=None,
+            json={
+                "measurement_type": "temperature",
+                "unit": "celsius",
+            },
+        )
+    )
+
+    assert response.status_code == 201
+    assert db.execute.call_count == 2
+
+    insert_params = db.execute.call_args_list[1].args[1]
+    generated_code = insert_params["sensor_code"]
+
+    assert generated_code.startswith("TEMP-")
+    assert len(generated_code) == 13
+    assert all(char in "0123456789ABCDEF" for char in generated_code[5:])
+    assert insert_params["measurement_type"] == "temperature"
+    assert insert_params["unit"] == "celsius"
+
 def test_create_sensor_device_not_found(sensor_client):
     db, request = sensor_client
     db.execute.return_value = result(first=None)

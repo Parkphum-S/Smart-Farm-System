@@ -228,17 +228,64 @@ def send(client, setup, payload=None):
     )
 
 
+def set_last_seen(setup, value):
+    with setup["owner"].begin() as conn:
+        result = conn.execute(
+            text("""
+                UPDATE devices
+                SET last_seen_at = :value
+                WHERE id = :device_id
+                  AND tenant_id = :tenant_id
+            """),
+            {
+                "value": value,
+                "device_id": setup["device_id"],
+                "tenant_id": setup["tenant_id"],
+            },
+        )
+        assert result.rowcount == 1
+
+
+def get_last_seen(setup):
+    with setup["owner"].connect() as conn:
+        return conn.execute(
+            text("""
+                SELECT last_seen_at
+                FROM devices
+                WHERE id = :device_id
+                  AND tenant_id = :tenant_id
+            """),
+            {
+                "device_id": setup["device_id"],
+                "tenant_id": setup["tenant_id"],
+            },
+        ).scalar_one()
+
+
+def assert_last_seen_unchanged(setup, expected):
+    assert get_last_seen(setup) == expected
+
+
 def test_real_credential_persists_and_deduplicates(
     device_setup, http_client
 ):
     setup = device_setup
     first = send(http_client, setup)
-    second = send(http_client, setup)
 
     assert first.status_code == 202, first.text
     assert first.json()["duplicate"] is False
+    assert get_last_seen(setup) is not None
+
+    sentinel = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    set_last_seen(setup, sentinel)
+
+    second = send(http_client, setup)
     assert second.status_code == 202, second.text
     assert second.json()["duplicate"] is True
+
+    duplicate_seen = get_last_seen(setup)
+    assert duplicate_seen is not None
+    assert duplicate_seen > sentinel
 
     with setup["owner"].connect() as conn:
         assert conn.execute(
@@ -264,8 +311,12 @@ def test_revoked_credential_is_rejected(device_setup, http_client):
             {"id": setup["credential_id"]},
         )
 
+    sentinel = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    set_last_seen(setup, sentinel)
+
     response = send(http_client, setup)
     assert response.status_code == 401
+    assert_last_seen_unchanged(setup, sentinel)
 
 
 def test_inactive_tenant_is_rejected(device_setup, http_client):
@@ -276,8 +327,12 @@ def test_inactive_tenant_is_rejected(device_setup, http_client):
             {"id": setup["tenant_id"]},
         )
 
+    sentinel = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    set_last_seen(setup, sentinel)
+
     response = send(http_client, setup)
     assert response.status_code == 401
+    assert_last_seen_unchanged(setup, sentinel)
 
 
 def test_conflicting_event_id_returns_409(device_setup, http_client):
@@ -294,8 +349,12 @@ def test_conflicting_event_id_returns_409(device_setup, http_client):
             }
         ],
     }
+    sentinel = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    set_last_seen(setup, sentinel)
+
     response = send(http_client, setup, changed)
     assert response.status_code == 409
+    assert_last_seen_unchanged(setup, sentinel)
 
 
 def test_database_failure_rolls_back_event(device_setup, http_client):
@@ -310,8 +369,12 @@ def test_database_failure_rolls_back_event(device_setup, http_client):
         ],
     }
 
+    sentinel = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    set_last_seen(setup, sentinel)
+
     response = send(http_client, setup, payload)
     assert response.status_code == 503, response.text
+    assert_last_seen_unchanged(setup, sentinel)
     assert "database" not in response.text.lower()
 
     with setup["owner"].connect() as conn:

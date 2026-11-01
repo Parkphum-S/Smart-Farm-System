@@ -2,10 +2,41 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { ApiError, authApi, session, type AuthUser } from "./services/api";
 import type { ReactNode } from "react";
 
-type AuthStatus = "checking" | "anonymous" | "authenticated";
+type AuthStatus =
+  | "checking"
+  | "anonymous"
+  | "transitioning"
+  | "authenticated";
 
 interface AuthGateProps {
   children: ReactNode;
+}
+
+interface SplashScreenProps {
+  message: string;
+}
+
+function SplashScreen({ message }: SplashScreenProps) {
+  return (
+    <main className="auth-screen auth-splash" aria-live="polite">
+      <section className="auth-brand auth-splash-content">
+        <span className="auth-logo" aria-label="Smart Farm logo">
+          SF
+        </span>
+
+        <p className="auth-eyebrow">SMART FARM MANAGEMENT</p>
+        <h1>Smart Farm</h1>
+        <p>System V.1</p>
+
+        <span className="auth-spinner" aria-hidden="true" />
+        <span className="auth-muted">{message}</span>
+      </section>
+
+      <span className="auth-splash-footer">
+        SMART FARM SYSTEM
+      </span>
+    </main>
+  );
 }
 
 export default function AuthGate({ children }: AuthGateProps) {
@@ -22,6 +53,7 @@ export default function AuthGate({ children }: AuthGateProps) {
     setStatus("anonymous");
   }, []);
 
+  // ตรวจสอบ Session เมื่อเปิดหน้าเว็บหรือ Refresh
   useEffect(() => {
     let active = true;
 
@@ -33,12 +65,14 @@ export default function AuthGate({ children }: AuthGateProps) {
 
       try {
         const currentUser = await authApi.me();
+
         if (active) {
           setUser(currentUser);
           setStatus("authenticated");
         }
       } catch {
         session.clear();
+
         if (active) {
           setUser(null);
           setStatus("anonymous");
@@ -58,6 +92,17 @@ export default function AuthGate({ children }: AuthGateProps) {
       window.removeEventListener("smartfarm:unauthorized", onUnauthorized);
     };
   }, [clearSession]);
+
+  // แสดง Splash ช่วงสั้น ๆ หลัง Login สำเร็จ
+  useEffect(() => {
+    if (status !== "transitioning") return;
+
+    const timer = window.setTimeout(() => {
+      setStatus("authenticated");
+    }, 650);
+
+    return () => window.clearTimeout(timer);
+  }, [status]);
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -84,7 +129,7 @@ export default function AuthGate({ children }: AuthGateProps) {
       }
 
       setPassword("");
-      setStatus("authenticated");
+      setStatus("transitioning");
     } catch (cause) {
       setError(
         cause instanceof ApiError
@@ -113,17 +158,11 @@ export default function AuthGate({ children }: AuthGateProps) {
   }
 
   if (status === "checking") {
-    return (
-      <main className="auth-screen" aria-live="polite">
-        <section className="auth-brand">
-          <span className="auth-logo">SF</span>
-          <h1>Smart Farm</h1>
-          <p>System V.1</p>
-          <span className="auth-spinner" aria-hidden="true" />
-          <span className="auth-muted">กำลังตรวจสอบ Session...</span>
-        </section>
-      </main>
-    );
+    return <SplashScreen message="กำลังตรวจสอบ Session..." />;
+  }
+
+  if (status === "transitioning") {
+    return <SplashScreen message="เข้าสู่ระบบสำเร็จ กำลังเตรียมระบบ..." />;
   }
 
   if (status === "anonymous") {

@@ -1,7 +1,7 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from threading import Barrier
+from threading import Barrier, Event
 from uuid import uuid4
 
 import pytest
@@ -223,3 +223,144 @@ def test_concurrent_same_id_different_payload_conflicts(seeded):
         ).scalar_one()
     assert n_events == 1
     assert n_readings == 1
+
+
+def test_sensor_metadata_update_waits_for_ingestion_and_is_rejected(seeded):
+    owner, identity, make_event = seeded
+    event = make_event(uuid4())
+
+    lock_acquired = Event()
+    release_ingestion = Event()
+    updater_started = Event()
+    updater_finished = Event()
+
+    class PausingSession:
+        def __init__(self, session):
+            self.session = session
+
+        def execute(self, statement, params=None, *args, **kwargs):
+            result = self.session.execute(
+                statement, params or {}, *args, **kwargs
+            )
+            sql = str(statement).upper()
+
+            if "FROM SENSORS" in sql and "FOR SHARE" in sql:
+                lock_acquired.set()
+                if not release_ingestion.wait(timeout=10):
+                    raise TimeoutError(
+                        "Timed out waiting to release sensor lock"
+                    )
+
+            return result
+
+    def ingest():
+        with SessionLocal.begin() as db:
+            return ingest_telemetry(
+                PausingSession(db), identity, event
+            ).duplicate
+
+    def update_metadata():
+        updater_started.set()
+        try:
+            with SessionLocal.begin() as db:
+                db.execute(
+                    text("""
+                        SELECT id
+                        FROM sensors
+                        WHERE id = :sensor_id
+                          AND tenant_id = :tenant_id
+                          AND device_id = :device_id
+                        FOR UPDATE
+                    """),
+                    {
+                        "sensor_id": event.readings[0].sensor_id,
+                        "tenant_id": identity.tenant_id,
+                        "device_id": identity.device_id,
+                    },
+                ).first()
+
+                has_readings = db.execute(
+                    text("""
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM sensor_readings
+                            WHERE tenant_id = :tenant_id
+                              AND device_id = :device_id
+                              AND sensor_id = :sensor_id
+                        )
+                    """),
+                    {
+                        "tenant_id": identity.tenant_id,
+                        "device_id": identity.device_id,
+                        "sensor_id": event.readings[0].sensor_id,
+                    },
+                ).scalar_one()
+
+                if not has_readings:
+                    db.execute(
+                        text("""
+                            UPDATE sensors
+                            SET measurement_type = 'humidity',
+                                unit = 'percent'
+                            WHERE id = :sensor_id
+                              AND tenant_id = :tenant_id
+                              AND device_id = :device_id
+                        """),
+                        {
+                            "sensor_id": event.readings[0].sensor_id,
+                            "tenant_id": identity.tenant_id,
+                            "device_id": identity.device_id,
+                        },
+                    )
+
+                return not has_readings
+        finally:
+            updater_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        ingest_future = pool.submit(ingest)
+        update_future = None
+
+        try:
+            assert lock_acquired.wait(timeout=10), (
+                "Telemetry did not acquire the expected sensor FOR SHARE lock"
+            )
+
+            update_future = pool.submit(update_metadata)
+            assert updater_started.wait(timeout=10)
+
+            assert not updater_finished.wait(timeout=0.25), (
+                "Metadata update was not blocked by the telemetry sensor lock"
+            )
+        finally:
+            release_ingestion.set()
+
+        assert ingest_future.result(timeout=30) is False
+        assert update_future is not None
+        assert update_future.result(timeout=30) is False
+
+    with owner.connect() as conn:
+        sensor = conn.execute(
+            text("""
+                SELECT measurement_type, unit
+                FROM sensors
+                WHERE id = :sensor_id
+            """),
+            {"sensor_id": event.readings[0].sensor_id},
+        ).one()
+
+        reading = conn.execute(
+            text("""
+                SELECT measurement_type, unit
+                FROM sensor_readings
+                WHERE tenant_id = :tenant_id
+                  AND sensor_id = :sensor_id
+            """),
+            {
+                "tenant_id": identity.tenant_id,
+                "sensor_id": event.readings[0].sensor_id,
+            },
+        ).one()
+
+    assert sensor == ("temperature", "C")
+    assert reading == ("temperature", "C")

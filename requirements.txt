@@ -8,3 +8,6 @@ psycopg[binary]>=3.2,<4
 
 argon2-cffi>=23.1,<26
 python-multipart>=0.0.18,<1
+
+paho-mqtt>=2.1,<3
+httpx>=0.27,<1

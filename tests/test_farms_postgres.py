@@ -256,6 +256,8 @@ def test_postgres_lists_only_farms_for_authorized_tenant(
         "id",
         "name",
         "timezone",
+        "latitude",
+        "longitude",
         "created_at",
         "updated_at",
     }
@@ -586,6 +588,12 @@ def test_postgres_runtime_farm_privileges(app_engine):
                         current_user, 'farms', 'updated_at', 'UPDATE'
                     ),
                     has_column_privilege(
+                        current_user, 'farms', 'latitude', 'UPDATE'
+                    ),
+                    has_column_privilege(
+                        current_user, 'farms', 'longitude', 'UPDATE'
+                    ),
+                    has_column_privilege(
                         current_user, 'farms', 'tenant_id', 'UPDATE'
                     ),
                     has_column_privilege(
@@ -609,7 +617,7 @@ def test_postgres_runtime_farm_privileges(app_engine):
     )
     assert tuple(table_privileges) == (True, True, True)
     assert tuple(update_privileges) == (
-        True, True, True, False, False, True, True
+        True, True, True, True, True, False, False, True, True
     )
 
 
